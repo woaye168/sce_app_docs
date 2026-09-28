@@ -4,7 +4,7 @@
 
 ## 项目定位
 
-文档站（sce_app_docs）：独立的 egui 桌面应用。通过宿主 [bgd_sce_tools](https://github.com/woaye168/bgd_sce_tools) 的「应用市场」安装分发，宿主启动时传 `--project-path <项目根>`。应用单实例；`--background` 静默驻留；`--quit` 优雅退出；窗口 X = 正常退出。
+本地文档站（sce_app_docs）：独立的 egui 桌面应用。通过宿主 [bgd_sce_tools](https://github.com/woaye168/bgd_sce_tools) 的「应用市场」安装分发，宿主启动时传 `--project-path <项目根>`。应用单实例；`--background` 静默驻留；`--quit` 优雅退出；窗口 X = 正常退出。
 
 ## 技术栈与规范
 

@@ -239,27 +239,54 @@ fn write_site_config(
         let _ = std::fs::remove_dir_all(&dst);
         link_dir(src, &dst)?;
     }
-    // 首页：项目根目录有 index/README/AGENTS 时 junction 过来当首页，没有才用默认导航页
+    // 首页：项目根有 index/README/AGENTS 时 junction 整个项目根到 _root/，
+    // srcExclude 只留首页文件，rewrites 映射到站点根 index.md（零复制、实时生效）。
+    // 没有首页文件才写默认导航页。
     let project_name = project_root.file_name()
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| "项目".into());
-    if let Some(home_file) = find_home_file(project_root) {
-        // 项目根有首页文件，junction 到站点根覆盖默认首页
-        let dst = dir.join("index.md");
-        let _ = std::fs::remove_file(&dst);
-        link_file(&project_root.join(&home_file), &dst)?;
-    } else {
-        // 默认导航页：文档源列表（有首页的源才生成链接，没有则纯文本不跳转）
-        let mut nav = format!("# {project_name} 文档\n\n左侧边栏选择文档分类。\n\n## 文档源\n\n");
-        for (name, src) in sources {
-            if find_home_file(src).is_some() {
-                nav.push_str(&format!("- [{name}](/{name}/)\n"));
-            } else {
-                nav.push_str(&format!("- {name}（无首页，请从左侧边栏浏览）\n"));
-            }
-        }
-        std::fs::write(dir.join("index.md"), nav)?;
+    let project_home = find_home_file(project_root);
+    if project_home.is_some() {
+        let dst = dir.join("_root");
+        let _ = std::fs::remove_dir_all(&dst);
+        link_dir(project_root, &dst)?;
     }
+    // 默认导航页：提示文字 + 项目根 md 文件列表 + 文档源列表 + .bgd 结构图
+    let mut nav = format!("# {project_name} 文档\n\n点「左侧导航」展开文档源\n\n");
+    // 项目根 md 文件列表（含首页，按优先级排序：index > README > AGENTS > 其他）
+    if let Ok(entries) = std::fs::read_dir(project_root) {
+        let mut mds: Vec<String> = entries.flatten()
+            .filter(|e| e.path().extension().map(|x| x == "md").unwrap_or(false))
+            .filter_map(|e| e.file_name().to_string_lossy().strip_suffix(".md").map(|s| s.to_string()))
+            .collect();
+        // 优先级排序：index > README > AGENTS > 其他（字母序）
+        mds.sort_by_key(|m| {
+            let l = m.to_lowercase();
+            if l == "index" { 0 } else if l == "readme" { 1 } else if l == "agents" { 2 } else { 3 }
+        });
+        if !mds.is_empty() {
+            for m in &mds {
+                nav.push_str(&format!("- [{m}](/_root/{m}.md)\n"));
+            }
+            nav.push_str("\n");
+        }
+    }
+    nav.push_str("## 文档源\n\n");
+    for (name, src) in sources {
+        if find_home_file(src).is_some() {
+            nav.push_str(&format!("- [{name}](/{name}/)\n"));
+        } else {
+            nav.push_str(&format!("- {name}\n"));
+        }
+    }
+    // 结构图：.bgd 目录文件树（<pre> 标签保留换行，markdown 不解析 pre 内容）
+    let bgd_dir = project_root.join(".bgd");
+    if bgd_dir.is_dir() {
+        nav.push_str("\n## 结构图\n\n<pre class=\"ftree\">\n<span class=\"ft-dir\">.bgd/</span>\n");
+        write_file_tree(&bgd_dir, &bgd_dir, "", &mut nav);
+        nav.push_str("</pre>\n");
+    }
+    std::fs::write(dir.join("index.md"), nav)?;
 
     // VitePress config（从 site_template.json 读取，用户可手改覆盖）
     let tpl = read_site_template(home);
@@ -289,18 +316,25 @@ fn write_site_config(
             sidebar_items.push(format!("      {{ text: '{name}' }},"));
         }
     }
+    // srcExclude：项目根只留首页文件，其他全部排除（防项目根 md 全暴露）
+    let src_exclude_block = if let Some(home_file) = &project_home {
+        format!("  srcExclude: ['_root/**/*', '!_root/{home_file}'],\n")
+    } else {
+        String::new()
+    };
     let search_block = if tpl.search_provider.is_empty() {
         String::new()
     } else {
         format!("    search: {{ provider: '{}' }},\n", tpl.search_provider)
     };
     let cfg_text = format!(
-        "import {{ defineConfig }} from 'vitepress'\n\nexport default defineConfig({{\n  title: '{title}',\n  description: '{description}',\n  lang: '{lang}',\n  lastUpdated: {last_updated},\n  cleanUrls: {clean_urls},\n  rewrites: {{\n{rewrites}\n  }},\n  themeConfig: {{\n{search_block}    sidebar: [\n{sidebar_items}\n    ],\n  }},\n  vite: {{\n    resolve: {{ preserveSymlinks: {preserve_symlinks} }},\n    server: {{ fs: {{ strict: {fs_strict} }}, forwardConsole: {forward_console} }},\n  }},\n}})\n",
+        "import {{ defineConfig }} from 'vitepress'\n\nexport default defineConfig({{\n  title: '{title}',\n  description: '{description}',\n  lang: '{lang}',\n  lastUpdated: {last_updated},\n  cleanUrls: {clean_urls},\n{src_exclude_block}  rewrites: {{\n{rewrites}\n  }},\n  themeConfig: {{\n{search_block}    sidebar: [\n{sidebar_items}\n    ],\n  }},\n  vite: {{\n    resolve: {{ preserveSymlinks: {preserve_symlinks} }},\n    server: {{ fs: {{ strict: {fs_strict} }}, forwardConsole: {forward_console} }},\n  }},\n}})\n",
         title = project_name,
         description = tpl.description,
         lang = tpl.lang,
         last_updated = tpl.last_updated,
         clean_urls = tpl.clean_urls,
+        src_exclude_block = src_exclude_block,
         rewrites = rewrites.join("\n"),
         search_block = search_block,
         sidebar_items = sidebar_items.join("\n"),
@@ -309,7 +343,60 @@ fn write_site_config(
         forward_console = tpl.forward_console,
     );
     std::fs::write(cfg.join("config.mjs"), cfg_text)?;
+    // 自定义主题：结构图样式走 CSS 变量，跟随 VitePress 明暗主题自动切换
+    let theme_dir = cfg.join("theme");
+    std::fs::create_dir_all(&theme_dir)?;
+    std::fs::write(theme_dir.join("index.js"),
+        "import DefaultTheme from 'vitepress/theme'\nimport './custom.css'\nexport default DefaultTheme\n")?;
+    std::fs::write(theme_dir.join("custom.css"),
+        "/* 结构图：无背景色，目录/连接线颜色跟随明暗主题 */\n.ftree {\n  font-family: var(--vp-font-family-mono);\n  font-size: 13px;\n  line-height: 1.6;\n  padding: 0;\n  margin: 0;\n  overflow-x: auto;\n  background: transparent;\n}\n.ft-dir { color: var(--vp-c-text-1); font-weight: bold; }\n.ft-line { color: var(--vp-c-text-3); }\n")?;
     Ok(dir)
+}
+
+/// 文件类型颜色（结构图用；VitePress 支持内联 HTML）
+fn file_type_color(fname: &str) -> &'static str {
+    let ext = fname.rsplit('.').next().unwrap_or("");
+    match ext {
+        "md" => "#42b883",      // Vue 绿
+        "lua" => "#51a0cf",     // Lua 蓝
+        "json" => "#f1e05a",    // JSON 黄
+        "toml" => "#9c4221",    // TOML 橙
+        "yml" | "yaml" => "#cb171e", // YAML 红
+        "ts" | "tsx" => "#3178c6",   // TS 蓝
+        "js" | "jsx" => "#f7df1e",   // JS 黄
+        "rs" => "#dea584",      // Rust 橙
+        "png" | "jpg" | "jpeg" | "gif" | "svg" | "webp" => "#a074c4", // 图片紫
+        "txt" | "log" => "#8b949e", // 文本灰
+        _ => "#c9d1d9",         // 默认灰白
+    }
+}
+
+/// 递归写文件树（结构图用；树形缩进线，文件类型着色；white-space: pre 不用 <br>）
+fn write_file_tree(base: &Path, dir: &Path, prefix: &str, out: &mut String) {
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    let mut items: Vec<_> = entries.flatten()
+        .filter(|e| {
+            let fname = e.file_name().to_string_lossy().to_string();
+            !fname.starts_with('.') && fname != "node_modules" && fname != "target"
+        })
+        .collect();
+    items.sort_by_key(|e| (e.path().is_file(), e.file_name())); // 目录在前，文件在后
+    let count = items.len();
+    for (i, entry) in items.into_iter().enumerate() {
+        let path = entry.path();
+        let fname = entry.file_name().to_string_lossy().to_string();
+        let is_last = i == count - 1;
+        let connector = if is_last { "└── " } else { "├── " };
+        let line = format!("<span class=\"ft-line\">{prefix}{connector}</span>");
+        if path.is_dir() {
+            out.push_str(&format!("{line}<span class=\"ft-dir\">{fname}/</span>\n"));
+            let child_prefix = format!("{prefix}{}", if is_last { "    " } else { "│   " });
+            write_file_tree(base, &path, &child_prefix, out);
+        } else {
+            let color = file_type_color(&fname);
+            out.push_str(&format!("{line}<span style=\"color:{color}\">{fname}</span>\n"));
+        }
+    }
 }
 
 /// 目录首页文件查找：index.md > README.md > AGENTS.md（不区分大小写）
@@ -371,19 +458,6 @@ fn is_vitepress_v2(home: &Path) -> bool {
     let Ok(content) = std::fs::read_to_string(&pkg) else { return false };
     // 粗匹配 "version": "2.xxx"
     content.contains("\"version\": \"2.")
-}
-
-/// 文件链接（junction 只支持目录，文件用硬链接/symlink）
-#[cfg(windows)]
-fn link_file(src: &Path, dst: &Path) -> std::io::Result<()> {
-    // Windows 文件硬链接（同分区零拷贝）
-    std::fs::hard_link(src, dst)
-        .or_else(|_| std::os::windows::fs::symlink_file(src, dst))
-}
-
-#[cfg(not(windows))]
-fn link_file(src: &Path, dst: &Path) -> std::io::Result<()> {
-    std::os::unix::fs::symlink(src, dst)
 }
 
 /// 目录链接（junction 优先，失败降级 symlink）

@@ -1,4 +1,4 @@
-//! 文档站（sce_app_docs）：基于 bgd_appsdk 的标准应用骨架
+//! 本地文档站（sce_app_docs）：基于 bgd_appsdk 的标准应用骨架
 //!
 //! 本文件为入口聚合：应用状态 + ShellApp 壳实现（ui_tab 只做分发）；
 //! 标签页 UI 分散在 src/ui/ 各页面文件（impl App）。
