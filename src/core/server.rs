@@ -369,10 +369,10 @@ fn write_site_config(
     );
     std::fs::write(cfg.join("config.mjs"), cfg_text)?;
     // 独立 vite.config.js：vitepress 只透传 server/configFile，config.vite 其他字段被忽略
-    // 所以 server.headers 要放独立文件里（vitepress 会加载 config.vite.configFile 指向的文件）
-    // hmr: false + ws: false 关掉 WebSocket 热更新（Cloudflare Tunnel 不支持 ws，vitepress 文档站也不需要 HMR）
-    // resolve.dedupe 强制 vue/vitepress 单实例（junction 路径变化可能导致模块加载两次，provide/inject 的 Symbol 不匹配）
-    // transformIndexHtml 给 vitepress 注入的 script 标签加 hash（防浏览器缓存旧模块）
+    // hmr: false + ws: false 关掉 WebSocket 热更新（文档站不需要 HMR，避免 ws 重连报错）
+    // transformIndexHtml 给 vitepress 注入的 script 标签加 hash（防浏览器缓存旧模块，修切项目白屏）
+    // 注意：不要一刀切 server.headers no-cache——它会覆盖依赖模块的 immutable 强缓存，拖慢页面加载
+    // （vite 默认：HTML no-cache，带 ?v= hash 的依赖 max-age=31536000,immutable，正合适）
     let vite_cfg = dir.join("vite.config.js");
     std::fs::write(&vite_cfg, r#"export default {
   plugins: [{
@@ -382,8 +382,7 @@ fn write_site_config(
       return html.replace(/src="(\/@fs\/[^"]+)"/, `src="$1?v=${hash}"`);
     }
   }],
-  resolve: { dedupe: ['vue', 'vitepress'] },
-  server: { headers: { 'Cache-Control': 'no-cache' }, hmr: false, ws: false }
+  server: { hmr: false, ws: false }
 }
 "#)?;
     // 自定义主题：结构图样式走 CSS 变量，跟随 VitePress 明暗主题自动切换
