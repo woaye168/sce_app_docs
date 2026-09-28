@@ -21,6 +21,9 @@ pub struct GlobalConfig {
     /// dev server 端口（0 = 默认 18753）
     #[serde(default)]
     pub port: u16,
+    /// 局域网访问（true = 绑 0.0.0.0，手机/其他设备可访问；false = 只本机 ::1）
+    #[serde(default)]
+    pub lan_access: bool,
     /// 全局文档源（所有项目共享）
     #[serde(default)]
     pub sources: Vec<DocSource>,

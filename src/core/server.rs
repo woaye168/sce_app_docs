@@ -33,15 +33,15 @@ pub struct ServerState {
     pub phase: StartPhase,
     /// 站点目录（读 dev-server.log 用；pub 供 CLI 场景读取）
     pub site_dir: Option<PathBuf>,
-    /// 端口探测连续失败计数（防 vitepress restart 瞬间误判）
-    fail_count: u8,
+    /// 端口探测首次失败时间（持续 1s 失败才判死；防 vitepress 热重载 restart 瞬间断连误判）
+    fail_since: Option<std::time::Instant>,
     /// 后台启动任务的完成信号（整条链的结果）
     boot_done: Option<std::sync::mpsc::Receiver<BootResult>>,
 }
 
 impl Default for ServerState {
     fn default() -> Self {
-        Self { child: None, port: 0, last_error: String::new(), phase: StartPhase::Idle, site_dir: None, fail_count: 0, boot_done: None }
+        Self { child: None, port: 0, last_error: String::new(), phase: StartPhase::Idle, site_dir: None, fail_since: None, boot_done: None }
     }
 }
 
@@ -491,6 +491,7 @@ pub const DEFAULT_PORT: u16 = 18753;
 /// 后台启动整条链：装全局依赖（若缺）→ 聚合源写 config → spawn dev server。
 /// 全部在独立线程完成，结果经 channel 回 UI 线程（boot_tick 收）。
 pub fn start(project_root: &Path, global: &GlobalConfig, project: &ProjectConfig, st: &mut ServerState) {
+    let lan = global.lan_access;
     stop(st);
     st.last_error.clear();
 
@@ -516,7 +517,7 @@ pub fn start(project_root: &Path, global: &GlobalConfig, project: &ProjectConfig
             // 补杀上次残留的孤儿进程（app 异常退出/句柄丢失时 child 拿不到，靠 PID 文件兜底）
             kill_orphan(&site);
             std::thread::spawn(move || {
-                let r = boot_chain(home, node, Some(site), port);
+                let r = boot_chain(home, node, Some(site), port, lan);
                 let _ = tx.send(r);
             });
         }
@@ -529,7 +530,8 @@ pub fn start(project_root: &Path, global: &GlobalConfig, project: &ProjectConfig
 }
 
 /// 后台链本体：装依赖 → spawn dev（全在独立线程，不卡 UI）
-fn boot_chain(home: PathBuf, node: PathBuf, site: Option<PathBuf>, port: u16) -> BootResult {
+/// lan = true 时绑 0.0.0.0（局域网可访问），false 只本机
+fn boot_chain(home: PathBuf, node: PathBuf, site: Option<PathBuf>, port: u16, lan: bool) -> BootResult {
     let mut r = BootResult { child: None, port: 0, error: String::new() };
     let Some(site) = site else {
         r.error = "站点 config 生成失败".into();
@@ -564,15 +566,20 @@ fn boot_chain(home: PathBuf, node: PathBuf, site: Option<PathBuf>, port: u16) ->
     // 等端口释放（taskkill 后 TCP 回收有延迟，不等会让新进程被挤到别的端口）
     wait_port_free(port, 2000);
 
-    // spawn dev server（全局 vitepress 二进制跑项目站点目录）
-    // stderr/stdout 落日志文件（进程退出时 UI 能读到真实原因）
-    let vp = home.join("node_modules/.bin/vitepress.cmd");
+    // spawn dev server：直接 spawn node.exe 跑 vitepress.js（跳过 .bin/vitepress.cmd 壳）。
+    // cmd 壳 spawn node 后自己退出，child 句柄记壳 PID，杀壳杀不到 node 子进程——这是孤儿残留根因。
+    // 直接 spawn node 后 child 就是 node 进程本身，kill / PID 文件全部对准真服务进程。
+    let vp = home.join("node_modules/vitepress/bin/vitepress.js");
     let log_path = site.join("dev-server.log");
     let log_file = std::fs::File::create(&log_path).ok();
-    let mut cmd = Command::new(vp);
-    // vitepress dev <root>：source 即站点根（.vitepress/ 所在目录）；--port 显式指定
-    // --strictPort：端口被占直接报错，不静默换端口（换端口会让用户访问旧端口看到旧项目）
-    cmd.arg("dev").arg(&site).arg("--port").arg(port.to_string()).arg("--strictPort").current_dir(&site);
+    let mut cmd = Command::new(&node);
+    // node vitepress.js dev <root> --port <port>（site 即 .vitepress/ 所在目录）
+    cmd.arg(&vp).arg("dev").arg(&site).arg("--port").arg(port.to_string());
+    // 局域网开关：绑 0.0.0.0 允许手机/其他设备访问（vitepress --host 0.0.0.0）
+    if lan {
+        cmd.arg("--host").arg("0.0.0.0");
+    }
+    cmd.current_dir(&site);
     if let Some(f) = log_file {
         match f.try_clone() {
             Ok(f2) => { cmd.stderr(f2); }
@@ -605,7 +612,7 @@ pub fn boot_tick(st: &mut ServerState) {
                 st.child = Some(c.0);
                 st.port = r.port;
                 st.phase = StartPhase::Running;
-                st.fail_count = 0;
+                st.fail_since = None;
             } else {
                 st.last_error = r.error;
                 st.phase = StartPhase::Failed;
@@ -614,21 +621,27 @@ pub fn boot_tick(st: &mut ServerState) {
     }
     // 运行中存活检测：探测端口而非进程句柄——vitepress.cmd 壳 spawn node 子进程后自己退出，
     // try_wait 会误判「已退出」，但真服务（node）还活着；端口能连才是真活着。
-    // 连续 3 次探测失败才判死（vitepress config 热重载 restart 瞬间端口短暂断连，单次误判）
+    // 时间窗口判定：持续 1000ms 探测失败才判死（GUI 每帧轮询、CLI 200ms 轮询，次数阈值不公平；
+    // vitepress config 热重载 restart 瞬间端口短暂断连几百毫秒，时间窗口内恢复则不计失败）
     if st.phase == StartPhase::Running {
+        // 双栈探测：vitepress 2.x 只监听 IPv6 [::1]，连 127.0.0.1 会被拒绝
+        let timeout = std::time::Duration::from_millis(300);
         let alive = std::net::TcpStream::connect_timeout(
             &std::net::SocketAddr::from(([127, 0, 0, 1], st.port)),
-            std::time::Duration::from_millis(500),
+            timeout,
+        ).is_ok() || std::net::TcpStream::connect_timeout(
+            &std::net::SocketAddr::from(([0, 0, 0, 0, 0, 0, 0, 1], st.port)),
+            timeout,
         ).is_ok();
         if alive {
-            st.fail_count = 0;
+            st.fail_since = None;
         } else {
-            st.fail_count += 1;
-            if st.fail_count >= 3 {
+            let since = st.fail_since.get_or_insert_with(std::time::Instant::now);
+            if since.elapsed().as_millis() >= 1000 {
                 let log_tail = st.site_dir.as_deref().map(read_dev_log_tail).unwrap_or_default();
                 st.child = None;
                 st.port = 0;
-                st.fail_count = 0;
+                st.fail_since = None;
                 if st.last_error.is_empty() {
                     st.last_error = log_tail;
                 }
@@ -658,8 +671,8 @@ fn read_dev_log_tail(site_dir: &Path) -> String {
     format!("dev server 进程已退出（查看 {}/dev-server.log）", site_dir.display())
 }
 
-/// 停止：杀整个进程树（vitepress.cmd 是 cmd 壳，真服务在 node 子进程，
-/// child.kill() 只杀壳会留孤儿占端口——必须 taskkill /T 整树）
+/// 停止：杀进程（现在 child 直接是 node 进程本身，kill 即杀真服务；
+/// taskkill /T 兜底连带可能的子进程）
 pub fn stop(st: &mut ServerState) {
     if let Some(c) = st.child.take() {
         kill_tree(&c);
@@ -676,14 +689,17 @@ pub fn stop(st: &mut ServerState) {
         }
     }
     st.site_dir = None;
-    st.fail_count = 0;
+    st.fail_since = None;
 }
 
 /// 等端口释放（taskkill 后 TCP 回收有延迟；最多等 max_ms 毫秒）
+/// 双栈检查：vitepress 监听 IPv6，只看 IPv4 会漏判
 fn wait_port_free(port: u16, max_ms: u64) {
     let start = std::time::Instant::now();
     while start.elapsed().as_millis() < max_ms as u128 {
-        if std::net::TcpListener::bind(("127.0.0.1", port)).is_ok() {
+        let v4 = std::net::TcpListener::bind(("127.0.0.1", port)).is_ok();
+        let v6 = std::net::TcpListener::bind(("::1", port)).is_ok();
+        if v4 && v6 {
             return;
         }
         std::thread::sleep(std::time::Duration::from_millis(100));

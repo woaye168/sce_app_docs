@@ -87,9 +87,9 @@ const TABS: &[bgd_appsdk::ui::ShellTab] = &[
     bgd_appsdk::ui::ShellTab { id: "project", label: "项目设置" },
 ];
 
-/// CLI serve 子命令：sce_app_docs serve --project-path <项目根> [--port <端口>] [--timeout <秒>]
+/// CLI serve 子命令：sce_app_docs serve --project-path <项目根> [--port <端口>] [--timeout <秒>] [--lan]
 /// 同步阻塞：启动 dev server → 轮询端口直到就绪/超时 → 打印结果并 kill 退出。
-/// 专供自测/自动化（AI 无需 GUI 即可端到端验证服务可用）。
+/// 专供自测/自动化（AI 无需 GUI 即可端到端验证服务可用）。--lan 绑 0.0.0.0（局域网可访问）。
 fn run_cli_serve(args: &[String]) {
     use crate::core::{config, server};
     let get_arg = |flag: &str| -> Option<String> {
@@ -104,6 +104,9 @@ fn run_cli_serve(args: &[String]) {
     let mut g = config::read_global();
     if let Some(p) = get_arg("--port").and_then(|s| s.parse().ok()) {
         g.port = p;
+    }
+    if args.iter().any(|a| a == "--lan") {
+        g.lan_access = true;
     }
     let p = config::read_project(&project);
     server::start(&project, &g, &p, &mut st);
