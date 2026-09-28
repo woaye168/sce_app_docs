@@ -99,11 +99,12 @@ fn write_site_config(
         let _ = std::fs::remove_dir_all(&dst);
         link_dir(src, &dst)?;
     }
-    // 首页
-    let readme = docs.join("README.md");
-    if !readme.exists() {
-        std::fs::write(&readme, "# 本地文档站\n\n左侧边栏选择文档分类。\n")?;
+    // 首页（每次重写：源清单变化要反映在导航上）
+    let mut nav = String::from("# 本地文档站\n\n左侧边栏选择文档分类。\n\n## 文档源\n\n");
+    for (name, _) in sources {
+        nav.push_str(&format!("- [{name}](/{name}/)\n"));
     }
+    std::fs::write(docs.join("README.md"), nav)?;
 
     let cfg = dir.join(".vuepress");
     std::fs::create_dir_all(&cfg)?;
@@ -244,15 +245,30 @@ pub fn boot_tick(st: &mut ServerState) {
     }
 }
 
-/// 停止
+/// 停止：杀整个进程树（vuepress.cmd 是 cmd 壳，真服务在 node 子进程，
+/// child.kill() 只杀壳会留孤儿占端口——必须 taskkill /T 整树）
 pub fn stop(st: &mut ServerState) {
-    if let Some(mut c) = st.child.take() {
-        let _ = c.kill();
-        let _ = c.wait();
+    if let Some(c) = st.child.take() {
+        kill_tree(&c);
+        drop(c);
     }
     st.port = 0;
     st.phase = StartPhase::Idle;
     st.boot_done = None;
+}
+
+/// 杀进程树（Windows taskkill /T /F；整树连根拔）
+#[cfg(windows)]
+fn kill_tree(c: &Child) {
+    let mut cmd = Command::new("taskkill");
+    cmd.args(["/PID", &c.id().to_string(), "/T", "/F"]);
+    cmd.creation_flags(CREATE_NO_WINDOW);
+    let _ = cmd.output();
+}
+
+#[cfg(not(windows))]
+fn kill_tree(c: &Child) {
+    let _ = unsafe { libc::kill(c.id() as i32, libc::SIGTERM) };
 }
 
 #[cfg(test)]
