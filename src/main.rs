@@ -110,6 +110,7 @@ fn run_cli_serve(args: &[String]) {
     }
     if let Some(h) = get_arg("--allowed-hosts") {
         g.allowed_hosts = h;
+        g.allowed_hosts_enabled = true;
     }
     let p = config::read_project(&project);
     server::start(&project, &g, &p, &mut st);

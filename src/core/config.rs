@@ -24,6 +24,9 @@ pub struct GlobalConfig {
     /// 局域网访问（true = 绑 0.0.0.0，手机/其他设备可访问；false = 只本机 ::1）
     #[serde(default)]
     pub lan_access: bool,
+    /// 允许域名开关（false = allowed_hosts 不生效，域名配置保留）
+    #[serde(default)]
+    pub allowed_hosts_enabled: bool,
     /// 允许域名（逗号分隔，如 "docs.example.com, app.example.com"；vite server.allowedHosts）
     #[serde(default)]
     pub allowed_hosts: String,

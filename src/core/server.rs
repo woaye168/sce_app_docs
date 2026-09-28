@@ -332,12 +332,16 @@ fn write_site_config(
     } else {
         format!("    search: {{ provider: '{}' }},\n", tpl.search_provider)
     };
-    // 允许域名（vite 8 allowedHosts 安全校验；逗号分隔转 JS 数组）
-    let hosts: Vec<String> = allowed_hosts.split(',')
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .map(|s| format!("'{s}'"))
-        .collect();
+    // 允许域名（vite 8 allowedHosts 安全校验；开关关闭时跳过，域名配置保留）
+    let hosts: Vec<String> = if allowed_hosts.is_empty() {
+        Vec::new()
+    } else {
+        allowed_hosts.split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .map(|s| format!("'{s}'"))
+            .collect()
+    };
     let allowed_hosts_block = if hosts.is_empty() {
         String::new()
     } else {
@@ -525,7 +529,8 @@ pub fn start(project_root: &Path, global: &GlobalConfig, project: &ProjectConfig
     st.phase = if home.join("node_modules").is_dir() { StartPhase::Starting } else { StartPhase::InstallingDeps };
     let (tx, rx) = std::sync::mpsc::channel();
     st.boot_done = Some(rx);
-    match write_site_config(&home, project_root, &sources, &global.allowed_hosts) {
+    let hosts = if global.allowed_hosts_enabled { global.allowed_hosts.as_str() } else { "" };
+    match write_site_config(&home, project_root, &sources, hosts) {
         Ok(site) => {
             // 补杀上次残留的孤儿进程（app 异常退出/句柄丢失时 child 拿不到，靠 PID 文件兜底）
             kill_orphan(&site);
