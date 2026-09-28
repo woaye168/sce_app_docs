@@ -239,15 +239,27 @@ fn write_site_config(
         let _ = std::fs::remove_dir_all(&dst);
         link_dir(src, &dst)?;
     }
-    // 首页（每次重写：源清单变化要反映在导航上）
+    // 首页：项目根目录有 index/README/AGENTS 时 junction 过来当首页，没有才用默认导航页
     let project_name = project_root.file_name()
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| "项目".into());
-    let mut nav = format!("# {project_name} 文档\n\n左侧边栏选择文档分类。\n\n## 文档源\n\n");
-    for (name, _) in sources {
-        nav.push_str(&format!("- [{name}](/{name}/)\n"));
+    if let Some(home_file) = find_home_file(project_root) {
+        // 项目根有首页文件，junction 到站点根覆盖默认首页
+        let dst = dir.join("index.md");
+        let _ = std::fs::remove_file(&dst);
+        link_file(&project_root.join(&home_file), &dst)?;
+    } else {
+        // 默认导航页：文档源列表（有首页的源才生成链接，没有则纯文本不跳转）
+        let mut nav = format!("# {project_name} 文档\n\n左侧边栏选择文档分类。\n\n## 文档源\n\n");
+        for (name, src) in sources {
+            if find_home_file(src).is_some() {
+                nav.push_str(&format!("- [{name}](/{name}/)\n"));
+            } else {
+                nav.push_str(&format!("- {name}（无首页，请从左侧边栏浏览）\n"));
+            }
+        }
+        std::fs::write(dir.join("index.md"), nav)?;
     }
-    std::fs::write(dir.join("index.md"), nav)?;
 
     // VitePress config（从 site_template.json 读取，用户可手改覆盖）
     let tpl = read_site_template(home);
@@ -359,6 +371,19 @@ fn is_vitepress_v2(home: &Path) -> bool {
     let Ok(content) = std::fs::read_to_string(&pkg) else { return false };
     // 粗匹配 "version": "2.xxx"
     content.contains("\"version\": \"2.")
+}
+
+/// 文件链接（junction 只支持目录，文件用硬链接/symlink）
+#[cfg(windows)]
+fn link_file(src: &Path, dst: &Path) -> std::io::Result<()> {
+    // Windows 文件硬链接（同分区零拷贝）
+    std::fs::hard_link(src, dst)
+        .or_else(|_| std::os::windows::fs::symlink_file(src, dst))
+}
+
+#[cfg(not(windows))]
+fn link_file(src: &Path, dst: &Path) -> std::io::Result<()> {
+    std::os::unix::fs::symlink(src, dst)
 }
 
 /// 目录链接（junction 优先，失败降级 symlink）
