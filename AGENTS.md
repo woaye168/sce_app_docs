@@ -41,6 +41,14 @@ git tag v0.x.0 && git push origin v0.x.0   # CI 注入版本号 → 构建 → �
 - 版本号唯一来源是 git tag（Cargo.toml 固定 `0.0.0-dev`，CI 构建时注入）。
 - **本应用无自我更新**：版本更新统一由宿主 bgd_sce_tools 应用市场负责（registry 在 bgd_sce_appsdk，元数据来自本仓库 CI 合成的 app-release.json）。
 
+## CLI 子命令（自测/自动化）
+
+```bash
+sce_app_docs serve --project-path <项目根> [--port <端口>] [--timeout <秒>]
+```
+
+同步阻塞启动 dev server，轮询端口直到就绪/超时/失败后自动清理退出。`OK http://localhost:<port>`（exit 0）或 `FAILED`/`TIMEOUT`（exit 1）。**AI 改完 server 逻辑必须用这个端到端自测，不要让用户点 GUI 验证。**
+
 ## 修改守则
 
 - 公共基建（单实例/看守线程/日志/配置/窗口壳）禁止在本仓库重复实现；缺能力先改 bgd_appsdk 并升版本。
