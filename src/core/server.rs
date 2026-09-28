@@ -347,13 +347,12 @@ fn write_site_config(
     } else {
         format!("allowedHosts: [{}], ", hosts.join(", "))
     };
-    // 随机构建 ID：每次启动变，vite 认为配置变了 → 重新预构建依赖 → 模块 hash 变 → 浏览器缓存失效
-    let build_id = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis();
     let cfg_text = format!(
-        "import {{ defineConfig }} from 'vitepress'\n\n// vite 插件：覆盖 /@fs/ 路径的缓存头（vite 内部硬编码 max-age=14400，Cloudflare 会缓存旧模块）\nconst noCacheFs = {{\n  name: 'no-cache-fs',\n  configureServer(server) {{\n    server.middlewares.use((req, res, next) => {{\n      if (req.url.startsWith('/@fs/')) {{\n        res.setHeader('Cache-Control', 'no-cache');\n      }}\n      next();\n    }});\n  }},\n}};\n\nexport default defineConfig({{\n  title: '{title}',\n  description: '{description}',\n  lang: '{lang}',\n  lastUpdated: {last_updated},\n  cleanUrls: {clean_urls},\n{src_exclude_block}  rewrites: {{\n{rewrites}\n  }},\n  themeConfig: {{\n{search_block}    sidebar: [\n{sidebar_items}\n    ],\n  }},\n  vite: {{\n    plugins: [noCacheFs],\n    define: {{ __DOCS_BUILD_ID__: '{build_id}' }},\n    resolve: {{ preserveSymlinks: {preserve_symlinks} }},\n    server: {{ {allowed_hosts_block}fs: {{ strict: {fs_strict} }}, forwardConsole: {forward_console}, headers: {{ 'Cache-Control': 'no-cache' }} }},\n  }},\n}})\n",
+        "import {{ defineConfig }} from 'vitepress'\n\nexport default defineConfig({{\n  title: '{title}',\n  description: '{description}',\n  lang: '{lang}',\n  lastUpdated: {last_updated},\n  cleanUrls: {clean_urls},\n{src_exclude_block}  rewrites: {{\n{rewrites}\n  }},\n  themeConfig: {{\n{search_block}    sidebar: [\n{sidebar_items}\n    ],\n  }},\n  vite: {{
+    configFile: 'vite.config.js',
+    resolve: {{ preserveSymlinks: {preserve_symlinks} }},
+    server: {{ {allowed_hosts_block}fs: {{ strict: {fs_strict} }}, forwardConsole: {forward_console} }},
+  }},\n}})\n",
         title = project_name,
         description = tpl.description,
         lang = tpl.lang,
@@ -364,12 +363,29 @@ fn write_site_config(
         search_block = search_block,
         sidebar_items = sidebar_items.join("\n"),
         preserve_symlinks = tpl.preserve_symlinks,
-        build_id = build_id,
         allowed_hosts_block = allowed_hosts_block,
         fs_strict = tpl.fs_strict,
         forward_console = tpl.forward_console,
     );
     std::fs::write(cfg.join("config.mjs"), cfg_text)?;
+    // 独立 vite.config.js：vitepress 只透传 server/configFile，config.vite 其他字段被忽略
+    // 所以 server.headers 要放独立文件里（vitepress 会加载 config.vite.configFile 指向的文件）
+    // hmr: false + ws: false 关掉 WebSocket 热更新（Cloudflare Tunnel 不支持 ws，vitepress 文档站也不需要 HMR）
+    // resolve.dedupe 强制 vue/vitepress 单实例（junction 路径变化可能导致模块加载两次，provide/inject 的 Symbol 不匹配）
+    // transformIndexHtml 给 vitepress 注入的 script 标签加 hash（防浏览器缓存旧模块）
+    let vite_cfg = dir.join("vite.config.js");
+    std::fs::write(&vite_cfg, r#"export default {
+  plugins: [{
+    name: 'cache-bust-html',
+    transformIndexHtml(html) {
+      const hash = Date.now();
+      return html.replace(/src="(\/@fs\/[^"]+)"/, `src="$1?v=${hash}"`);
+    }
+  }],
+  resolve: { dedupe: ['vue', 'vitepress'] },
+  server: { headers: { 'Cache-Control': 'no-cache' }, hmr: false, ws: false }
+}
+"#)?;
     // 自定义主题：结构图样式走 CSS 变量，跟随 VitePress 明暗主题自动切换
     let theme_dir = cfg.join("theme");
     std::fs::create_dir_all(&theme_dir)?;
