@@ -66,7 +66,7 @@ impl App {
     }
 }
 
-/// 文档源列表编辑器（加/删行；name + path 两列）
+/// 文档源列表编辑器（加/删行；name + path 两列 + 选择器）
 fn ui_source_list(ui: &mut egui::Ui, sources: &mut Vec<DocSource>) {
     let mut del = None;
     for (i, s) in sources.iter_mut().enumerate() {
@@ -75,6 +75,18 @@ fn ui_source_list(ui: &mut egui::Ui, sources: &mut Vec<DocSource>) {
             ui.text_edit_singleline(&mut s.name);
             ui.label("路径");
             ui.text_edit_singleline(&mut s.path);
+            if ui.button("选择…").clicked() {
+                if let Some(p) = rfd::FileDialog::new().pick_folder() {
+                    s.path = p.display().to_string().replace('\\', "/");
+                    // 名称留空时自动取路径尾名
+                    if s.name.trim().is_empty() {
+                        s.name = p
+                            .file_name()
+                            .map(|n| n.to_string_lossy().into_owned())
+                            .unwrap_or_default();
+                    }
+                }
+            }
             if ui.button("删除").clicked() {
                 del = Some(i);
             }

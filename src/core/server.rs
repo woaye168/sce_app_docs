@@ -6,6 +6,27 @@ use crate::core::node;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 
+/// Windows 下不弹控制台窗口
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x08000000;
+
+/// 后台启动阶段（UI 轮询这个状态渲染进度）
+#[derive(Debug, Clone, PartialEq)]
+pub enum StartPhase {
+    /// 空闲（未启动）
+    Idle,
+    /// 正在装依赖（npm install，首次几分钟）
+    InstallingDeps,
+    /// 依赖就绪，正在起 dev server
+    Starting,
+    /// 运行中
+    Running,
+    /// 失败（last_error 有原因）
+    Failed,
+}
+
 /// 服务状态（UI 读这个渲染）
 pub struct ServerState {
     /// 运行中的 dev server 子进程
@@ -14,11 +35,24 @@ pub struct ServerState {
     pub port: u16,
     /// 最近一次错误（启动失败等）
     pub last_error: String,
+    /// 当前启动阶段（UI 进度展示）
+    pub phase: StartPhase,
+    /// 后台安装线程的完成信号（npm install 结果）
+    pub install_done: Option<std::sync::mpsc::Receiver<Result<(), String>>>,
+    /// 安装完成后待续的启动参数（项目根/端口）
+    pending_start: Option<(PathBuf, u16)>,
 }
 
 impl Default for ServerState {
     fn default() -> Self {
-        Self { child: None, port: 0, last_error: String::new() }
+        Self {
+            child: None,
+            port: 0,
+            last_error: String::new(),
+            phase: StartPhase::Idle,
+            install_done: None,
+            pending_start: None,
+        }
     }
 }
 
@@ -136,63 +170,96 @@ pub fn scaffold_site(project_root: &Path, port: u16) -> std::io::Result<()> {
     Ok(())
 }
 
-/// 确保依赖已装（node_modules 缺失时跑 npm install；有则跳过）
-fn ensure_deps(site: &Path, node: &Path) -> Result<(), String> {
-    if site.join("node_modules").is_dir() {
-        return Ok(());
-    }
-    let npm = node.with_file_name("npm.cmd");
-    let out = Command::new(npm)
-        .arg("install")
-        .current_dir(site)
-        .output()
-        .map_err(|e| format!("npm install 启动失败: {e}"))?;
-    if out.status.success() {
-        Ok(())
-    } else {
-        Err(format!(
-            "npm install 失败: {}",
-            String::from_utf8_lossy(&out.stderr)
-        ))
-    }
+/// 后台装依赖（npm install 几分钟，必须离 UI 线程）。
+/// 完成后经 channel 发结果；UI 轮询 start_tick 续上 dev server 启动。
+fn spawn_install(site: PathBuf, node: PathBuf, st: &mut ServerState) {
+    let (tx, rx) = std::sync::mpsc::channel();
+    st.install_done = Some(rx);
+    std::thread::spawn(move || {
+        let npm = node.with_file_name("npm.cmd");
+        let mut cmd = Command::new(npm);
+        cmd.arg("install").current_dir(&site);
+        #[cfg(windows)]
+        cmd.creation_flags(CREATE_NO_WINDOW);
+        let result = match cmd.output() {
+            Ok(out) if out.status.success() => Ok(()),
+            Ok(out) => Err(format!("npm install 失败: {}", String::from_utf8_lossy(&out.stderr))),
+            Err(e) => Err(format!("npm install 启动失败: {e}")),
+        };
+        let _ = tx.send(result);
+    });
 }
 
-/// 启动 dev server（前台 UI 调用；spawn 后立即返回，不阻塞）。
-/// 流程：解析 node → 聚合源 → 脚手架 → 装依赖 → spawn vuepress dev。
+/// 启动 dev server（UI 调用，立即返回不阻塞）。
+/// 流程：解析 node → 聚合源 → 脚手架 → node_modules 缺失则后台装依赖（poll_start 续）→ spawn dev。
 pub fn start(project_root: &Path, global: &GlobalConfig, project: &ProjectConfig, st: &mut ServerState) {
     stop(st);
     st.last_error.clear();
+    st.phase = StartPhase::Starting;
 
     let Some(node) = node::resolve() else {
         st.last_error = "未找到 node.exe（设置页配置或安装 Node.js）".into();
+        st.phase = StartPhase::Failed;
         return;
     };
     let port = if global.port == 0 { 8080 } else { global.port };
 
     if let Err(e) = scaffold_site(project_root, port) {
         st.last_error = format!("站点脚手架生成失败: {e}");
+        st.phase = StartPhase::Failed;
         return;
     }
     aggregate_sources(project_root, global, project);
 
     let site = site_dir(project_root);
-    if let Err(e) = ensure_deps(&site, &node) {
-        st.last_error = e;
-        return;
+    if site.join("node_modules").is_dir() {
+        spawn_dev(&site, port, st); // 依赖已装直接起
+    } else {
+        st.phase = StartPhase::InstallingDeps;
+        st.pending_start = Some((site, port));
+        spawn_install(site_dir(project_root), node, st);
     }
+}
 
-    // spawn vuepress dev（经 npm run dev，Windows 下走 cmd 包装）
-    let npm = node.with_file_name("npm.cmd");
-    let child = Command::new(npm)
-        .args(["run", "dev"])
-        .current_dir(&site)
-        .spawn();
-    match child {
+/// spawn vuepress dev server（不弹黑框）
+fn spawn_dev(site: &Path, port: u16, st: &mut ServerState) {
+    let npm = site.join("node_modules/.bin/vuepress.cmd");
+    let mut cmd = Command::new(npm);
+    cmd.args(["dev", "docs"]).current_dir(site);
+    #[cfg(windows)]
+    cmd.creation_flags(CREATE_NO_WINDOW);
+    match cmd.spawn() {
         Ok(c) => {
             st.child = Some(c);
             st.port = port;
+            st.phase = StartPhase::Running;
         }
-        Err(e) => st.last_error = format!("dev server 启动失败: {e}"),
+        Err(e) => {
+            st.last_error = format!("dev server 启动失败: {e}");
+            st.phase = StartPhase::Failed;
+        }
+    }
+}
+
+/// UI 每帧轮询：后台装依赖完成后续上 dev server 启动
+pub fn start_tick(st: &mut ServerState) {
+    if st.phase != StartPhase::InstallingDeps {
+        return;
+    }
+    let done = st.install_done.as_ref().and_then(|rx| rx.try_recv().ok());
+    let Some(result) = done else { return };
+    st.install_done = None;
+    match result {
+        Ok(()) => {
+            if let Some((site, port)) = st.pending_start.take() {
+                spawn_dev(&site, port, st);
+            }
+        }
+        Err(e) => {
+            st.last_error = e;
+            st.phase = StartPhase::Failed;
+            st.pending_start = None;
+        }
     }
 }
 
@@ -203,6 +270,10 @@ pub fn stop(st: &mut ServerState) {
         let _ = c.wait();
     }
     st.port = 0;
+    st.phase = StartPhase::Idle;
+    st.pending_start = None;
+    // 装依赖线程让它自己跑完（结果丢弃；进程退出时随 kill 清理）
+    st.install_done = None;
 }
 
 /// 服务是否在运行

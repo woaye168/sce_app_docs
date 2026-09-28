@@ -15,7 +15,7 @@ mod ui;
 use std::path::PathBuf;
 
 const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
-const APP_NAME: &str = "文档站";
+const APP_NAME: &str = "本地文档站";
 
 fn main() -> eframe::Result<()> {
     bgd_appsdk::app::run(
