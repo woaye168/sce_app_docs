@@ -2,6 +2,7 @@
 //! - VitePress 全局安装一次（app 数据目录 vitepress_home/，node_modules 一份）
 //! - 项目零侵入：源原地 junction 聚合，不写项目目录
 //! - 启动整链异步：探测/装依赖/起服务全离 UI 线程，UI 轮询 phase
+//! - 站点配置抽 JSON（vitepress_home/site_template.json），可手改覆盖
 
 use crate::core::config::{self, DocSource, GlobalConfig, ProjectConfig};
 use std::path::{Path, PathBuf};
@@ -56,13 +57,123 @@ pub fn vitepress_home() -> PathBuf {
     base.join("vitepress_home")
 }
 
-/// 生效源清单：api_generated 约定源 + 全局/项目合并源（只留真实存在的目录，绝对路径）
+/// 站点模板配置（vitepress_home/site_template.json；用户可手改，app 读取生成站点 config）
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct SiteTemplate {
+    /// 站点标题
+    #[serde(default = "default_title")]
+    pub title: String,
+    /// 站点描述
+    #[serde(default = "default_description")]
+    pub description: String,
+    /// 语言
+    #[serde(default = "default_lang")]
+    pub lang: String,
+    /// 是否 cleanUrls（VitePress 2.x + junction 需 false）
+    #[serde(default)]
+    pub clean_urls: bool,
+    /// 是否显示最后更新时间
+    #[serde(default)]
+    pub last_updated: bool,
+    /// 搜索 provider（local / algolia / 空 = 关闭）
+    #[serde(default = "default_search_provider")]
+    pub search_provider: String,
+    /// vite resolve.preserveSymlinks（junction 必须 true）
+    #[serde(default = "default_true")]
+    pub preserve_symlinks: bool,
+    /// vite server.fs.strict（junction 必须 false）
+    #[serde(default)]
+    pub fs_strict: bool,
+    /// vite server.forwardConsole（vite 8 注入 bug，关）
+    #[serde(default)]
+    pub forward_console: bool,
+}
+
+fn default_title() -> String { "本地文档站".into() }
+fn default_description() -> String { "项目文档聚合".into() }
+fn default_lang() -> String { "zh-CN".into() }
+fn default_search_provider() -> String { "local".into() }
+fn default_true() -> bool { true }
+
+impl Default for SiteTemplate {
+    fn default() -> Self {
+        Self {
+            title: default_title(),
+            description: default_description(),
+            lang: default_lang(),
+            clean_urls: false,
+            last_updated: false,
+            search_provider: default_search_provider(),
+            preserve_symlinks: true,
+            fs_strict: false,
+            forward_console: false,
+        }
+    }
+}
+
+/// 读站点模板（不存在则写默认）
+fn read_site_template(home: &Path) -> SiteTemplate {
+    let path = home.join("site_template.json");
+    if let Ok(content) = std::fs::read_to_string(&path) {
+        if let Ok(t) = serde_json::from_str(&content) {
+            return t;
+        }
+    }
+    let t = SiteTemplate::default();
+    let _ = std::fs::write(&path, serde_json::to_string_pretty(&t).unwrap_or_default());
+    t
+}
+
+/// bgd 配置链读 api_generated_dir：项目 bgd.json → 项目 libs/bgd_default.json → tools 安装目录 bgd_default.json
+fn read_api_generated_dir(project_root: &Path) -> String {
+    // 1. 项目 bgd.json（覆盖项）
+    let bgd_json = project_root.join(".bgd/bgd.json");
+    if let Ok(content) = std::fs::read_to_string(&bgd_json) {
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&content) {
+            if let Some(s) = v.get("api_generated_dir").and_then(|v| v.as_str()) {
+                return s.to_string();
+            }
+        }
+    }
+    // 2. 项目框架侧默认（.bgd/libs/bgd_default.json）
+    let libs_default = project_root.join(".bgd/libs/bgd_default.json");
+    if let Ok(content) = std::fs::read_to_string(&libs_default) {
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&content) {
+            if let Some(s) = v.get("api_generated_dir").and_then(|v| v.as_str()) {
+                return s.to_string();
+            }
+        }
+    }
+    // 3. tools 安装目录默认（exe 旁 bgd_default.json；docs 安装在 bgd_sce_tools/apps/docs，
+    //    所以 tools 安装目录 = exe 上两级）
+    if let Ok(exe) = std::env::current_exe() {
+        // exe 在 <tools>/apps/docs/sce_app_docs.exe → tools 目录 = exe.parent().parent().parent()
+        let tools_dir = exe.parent()
+            .and_then(|p| p.parent())
+            .and_then(|p| p.parent());
+        if let Some(tools) = tools_dir {
+            let tools_default = tools.join("bgd_default.json");
+            if let Ok(content) = std::fs::read_to_string(&tools_default) {
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&content) {
+                    if let Some(s) = v.get("api_generated_dir").and_then(|v| v.as_str()) {
+                        return s.to_string();
+                    }
+                }
+            }
+        }
+    }
+    // 兜底默认值
+    ".bgd/doc/api_generated".into()
+}
+
+/// 生效源清单：api_generated 约定源（bgd 配置链读取路径）+ 全局/项目合并源（只留真实存在的目录，绝对路径）
 fn effective_sources(
     project_root: &Path,
     global: &GlobalConfig,
     project: &ProjectConfig,
 ) -> Vec<(String, PathBuf)> {
-    let mut all = vec![DocSource { name: "api".into(), path: ".bgd/doc/api_generated".into() }];
+    let api_dir = read_api_generated_dir(project_root);
+    let mut all = vec![DocSource { name: "api".into(), path: api_dir }];
     all.extend(config::effective_sources(global, project));
     all.into_iter()
         .filter_map(|s| {
@@ -72,22 +183,51 @@ fn effective_sources(
         .collect()
 }
 
-/// 生成站点目录（vitepress_home/_sites/<项目hash>/）：
+/// 站点目录名：<项目目录名>-docs（可读，冲突时追加短 hash）
+fn site_dir_name(project_root: &Path) -> String {
+    let name = project_root.file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| "unknown".into());
+    // 项目目录名可能含特殊字符，过滤成合法目录名
+    let clean: String = name.chars().map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '-' }).collect();
+    format!("{clean}-docs")
+}
+
+/// 生成站点目录（vitepress_home/_sites/<项目名>-docs/）：
 /// junction 聚合源 + index.md 首页 + .vitepress/config.mjs。
 fn write_site_config(
     home: &Path,
     project_root: &Path,
     sources: &[(String, PathBuf)],
 ) -> std::io::Result<PathBuf> {
-    let hash = {
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
-        let mut h = DefaultHasher::new();
-        project_root.display().to_string().hash(&mut h);
-        format!("{:x}", h.finish())
+    let dir = home.join("_sites").join(site_dir_name(project_root));
+    // 站点目录已存在且是属于其他项目的（同名不同路径）→ 追加短 hash 区分
+    let dir = if dir.exists() && !dir.join(".project_root").exists() {
+        // 首次创建，标记项目路径
+        dir
+    } else if dir.exists() {
+        let marker = dir.join(".project_root");
+        let existing = std::fs::read_to_string(&marker).unwrap_or_default();
+        if existing.trim() != project_root.display().to_string() {
+            // 同名不同项目，追加短 hash
+            let hash = {
+                use std::collections::hash_map::DefaultHasher;
+                use std::hash::{Hash, Hasher};
+                let mut h = DefaultHasher::new();
+                project_root.display().to_string().hash(&mut h);
+                format!("{:x}", h.finish())
+            };
+            let dir = home.join("_sites").join(format!("{}-{}", site_dir_name(project_root), &hash[..8]));
+            dir
+        } else {
+            dir
+        }
+    } else {
+        dir
     };
-    let dir = home.join("_sites").join(hash);
     std::fs::create_dir_all(&dir)?;
+    // 标记项目路径（同名不同项目时区分用）
+    let _ = std::fs::write(dir.join(".project_root"), project_root.display().to_string());
 
     // 多源聚合：junction 到站点根（VitePress 文件路由能扫到 junction 里的 md，
     // 但 vite 默认 fs.strict 会拦 junction 外部路径——需配 fs.strict: false）。
@@ -104,16 +244,30 @@ fn write_site_config(
     }
     std::fs::write(dir.join("index.md"), nav)?;
 
-    // VitePress config（ESM；本地搜索内置 minisearch，无需额外插件；
-    // preserveSymlinks: 不 realpath junction（防路由被算成真实物理路径而 404）；
-    // fs.strict=false: 放行 junction 指向的站点外路径；
-    // cleanUrls=false: VitePress 2.x 的 cleanUrls 和 junction 有冲突（/api/ 404）；
-    // rewrites: VitePress 2.x 不再把 README.md 当 index 页，需显式映射）
+    // VitePress config（从 site_template.json 读取，用户可手改覆盖）
+    let tpl = read_site_template(home);
     let cfg = dir.join(".vitepress");
     std::fs::create_dir_all(&cfg)?;
     // 每个源的 README.md 都映射成 index.md（VitePress 2.x 不再自动识别 README）
     let rewrites: Vec<String> = sources.iter().map(|(name, _)| format!("    '{name}/README.md': '{name}/index.md',")).collect();
-    let cfg_text = format!("import {{ defineConfig }} from 'vitepress'\n\nexport default defineConfig({{\n  title: '本地文档站',\n  description: '项目文档聚合',\n  lang: 'zh-CN',\n  lastUpdated: false,\n  cleanUrls: false,\n  rewrites: {{\n{}\n  }},\n  themeConfig: {{\n    search: {{ provider: 'local' }},\n    sidebar: [],\n  }},\n  vite: {{\n    resolve: {{ preserveSymlinks: true }},\n    server: {{ fs: {{ strict: false }} }},\n  }},\n}})\n", rewrites.join("\n"));
+    let search_block = if tpl.search_provider.is_empty() {
+        String::new()
+    } else {
+        format!("    search: {{ provider: '{}' }},\n", tpl.search_provider)
+    };
+    let cfg_text = format!(
+        "import {{ defineConfig }} from 'vitepress'\n\nexport default defineConfig({{\n  title: '{title}',\n  description: '{description}',\n  lang: '{lang}',\n  lastUpdated: {last_updated},\n  cleanUrls: {clean_urls},\n  rewrites: {{\n{rewrites}\n  }},\n  themeConfig: {{\n{search_block}    sidebar: [],\n  }},\n  vite: {{\n    resolve: {{ preserveSymlinks: {preserve_symlinks} }},\n    server: {{ fs: {{ strict: {fs_strict} }}, forwardConsole: {forward_console} }},\n  }},\n}})\n",
+        title = tpl.title,
+        description = tpl.description,
+        lang = tpl.lang,
+        last_updated = tpl.last_updated,
+        clean_urls = tpl.clean_urls,
+        rewrites = rewrites.join("\n"),
+        search_block = search_block,
+        preserve_symlinks = tpl.preserve_symlinks,
+        fs_strict = tpl.fs_strict,
+        forward_console = tpl.forward_console,
+    );
     std::fs::write(cfg.join("config.mjs"), cfg_text)?;
     Ok(dir)
 }
@@ -328,7 +482,7 @@ mod tests {
     use super::*;
 
     fn setup_project(tag: &str) -> PathBuf {
-        let tmp = std::env::temp_dir().join(format!("bgd_docs_srv3_{tag}_{}", std::process::id()));
+        let tmp = std::env::temp_dir().join(format!("bgd_docs_srv4_{tag}_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(tmp.join(".bgd/doc/api_generated")).unwrap();
         std::fs::create_dir_all(tmp.join(".bgd/doc/research")).unwrap();
@@ -358,15 +512,41 @@ mod tests {
     }
 
     #[test]
+    fn api_generated_dir_reads_bgd_chain() {
+        let tmp = setup_project("bgd");
+        // 项目 bgd.json 覆盖
+        std::fs::write(tmp.join(".bgd/bgd.json"), r#"{"api_generated_dir": "custom/api"}"#).unwrap();
+        assert_eq!(read_api_generated_dir(&tmp), "custom/api");
+        // 删掉 bgd.json，读 libs/bgd_default.json
+        let _ = std::fs::remove_file(tmp.join(".bgd/bgd.json"));
+        std::fs::create_dir_all(tmp.join(".bgd/libs")).unwrap();
+        std::fs::write(tmp.join(".bgd/libs/bgd_default.json"), r#"{"api_generated_dir": "libs/api"}"#).unwrap();
+        assert_eq!(read_api_generated_dir(&tmp), "libs/api");
+        // 都删掉，兜底默认
+        let _ = std::fs::remove_file(tmp.join(".bgd/libs/bgd_default.json"));
+        assert_eq!(read_api_generated_dir(&tmp), ".bgd/doc/api_generated");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn site_dir_name_readable() {
+        let p = PathBuf::from("D:/projects/The_Shadow_of_Return");
+        assert_eq!(site_dir_name(&p), "The_Shadow_of_Return-docs");
+    }
+
+    #[test]
     fn site_config_links_sources() {
         let tmp = setup_project("cfg");
-        let home = std::env::temp_dir().join(format!("bgd_docs_home3_{}", std::process::id()));
+        let home = std::env::temp_dir().join(format!("bgd_docs_home4_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&home);
         let sources = effective_sources(&tmp, &GlobalConfig::default(), &ProjectConfig::default());
         let dir = write_site_config(&home, &tmp, &sources).unwrap();
         assert!(dir.join(".vitepress/config.mjs").is_file());
         assert!(dir.join("index.md").is_file());
         assert!(dir.join("api").exists()); // junction 到 api_generated
+        assert!(dir.join(".project_root").is_file()); // 项目路径标记
+        // 站点目录名可读
+        assert!(dir.file_name().unwrap().to_string_lossy().ends_with("-docs"));
         let _ = std::fs::remove_dir_all(&tmp);
         let _ = std::fs::remove_dir_all(&home);
     }

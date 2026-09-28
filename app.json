@@ -1,7 +1,7 @@
 {
   "id": "sce_app_docs",
   "name": "本地文档站",
-  "description": "本地文档站：VuePress 聚合框架 API 文档 + 项目文档，浏览器阅读",
+  "description": "基于vitepress的本地文档阅读",
   "author": "BGD",
   "asset_name": "sce_app_docs.exe"
 }
