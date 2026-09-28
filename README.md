@@ -1,6 +1,6 @@
 # sce_app_docs · 本地文档站
 
-星火编辑器（SCE）项目的本地文档聚合阅读工具：一个 egui 桌面应用，内嵌 VitePress dev server，把项目的框架 API 文档（api_generated）与自定义文档源聚合成一个带左导航、全文搜索的文档站，浏览器阅读体验。
+BGD的SCE项目的本地文档聚合阅读工具：一个 egui 桌面应用，内嵌 VitePress dev server，把项目的框架 API 文档（api_generated）与自定义文档源聚合成一个带左导航、全文搜索的文档站，浏览器阅读体验。
 
 ## 功能特性
 
