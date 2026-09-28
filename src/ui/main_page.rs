@@ -9,7 +9,7 @@ impl App {
         server::boot_tick(&mut self.server);
 
         ui.heading("本地文档站");
-        ui.label("VuePress 本地文档服务：聚合框架 API 文档 + 项目文档，浏览器阅读。");
+        ui.label("VitePress 本地文档服务：聚合框架 API 文档 + 项目文档，浏览器阅读。");
         ui.add_space(12.0);
 
         // 无项目时不可用
@@ -44,7 +44,7 @@ impl App {
         match phase {
             server::StartPhase::Running if running => {
                 ui.label(format!("运行中：http://localhost:{}", self.server.port));
-                ui.label(format!("VuePress 目录：{}", server::vuepress_home().display()));
+                ui.label(format!("VitePress 目录：{}", server::vitepress_home().display()));
             }
             server::StartPhase::InstallingDeps => {
                 ui.label("正在安装依赖（npm install，首次需几分钟）…");
