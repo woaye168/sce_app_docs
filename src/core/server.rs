@@ -31,19 +31,23 @@ pub struct ServerState {
     pub port: u16,
     pub last_error: String,
     pub phase: StartPhase,
+    /// 站点目录（读 dev-server.log 用；pub 供 CLI 场景读取）
+    pub site_dir: Option<PathBuf>,
+    /// 端口探测连续失败计数（防 vitepress restart 瞬间误判）
+    fail_count: u8,
     /// 后台启动任务的完成信号（整条链的结果）
     boot_done: Option<std::sync::mpsc::Receiver<BootResult>>,
 }
 
 impl Default for ServerState {
     fn default() -> Self {
-        Self { child: None, port: 0, last_error: String::new(), phase: StartPhase::Idle, boot_done: None }
+        Self { child: None, port: 0, last_error: String::new(), phase: StartPhase::Idle, site_dir: None, fail_count: 0, boot_done: None }
     }
 }
 
 /// 后台启动链的结果（成功带 dev server 子进程与端口）
 struct BootResult {
-    child: Option<Child>,
+    child: Option<(Child, PathBuf)>,
     port: u16,
     error: String,
 }
@@ -509,6 +513,8 @@ pub fn start(project_root: &Path, global: &GlobalConfig, project: &ProjectConfig
     st.boot_done = Some(rx);
     match write_site_config(&home, project_root, &sources) {
         Ok(site) => {
+            // 补杀上次残留的孤儿进程（app 异常退出/句柄丢失时 child 拿不到，靠 PID 文件兜底）
+            kill_orphan(&site);
             std::thread::spawn(move || {
                 let r = boot_chain(home, node, Some(site), port);
                 let _ = tx.send(r);
@@ -555,6 +561,9 @@ fn boot_chain(home: PathBuf, node: PathBuf, site: Option<PathBuf>, port: u16) ->
         }
     }
 
+    // 等端口释放（taskkill 后 TCP 回收有延迟，不等会让新进程被挤到别的端口）
+    wait_port_free(port, 2000);
+
     // spawn dev server（全局 vitepress 二进制跑项目站点目录）
     // stderr/stdout 落日志文件（进程退出时 UI 能读到真实原因）
     let vp = home.join("node_modules/.bin/vitepress.cmd");
@@ -562,7 +571,8 @@ fn boot_chain(home: PathBuf, node: PathBuf, site: Option<PathBuf>, port: u16) ->
     let log_file = std::fs::File::create(&log_path).ok();
     let mut cmd = Command::new(vp);
     // vitepress dev <root>：source 即站点根（.vitepress/ 所在目录）；--port 显式指定
-    cmd.arg("dev").arg(&site).arg("--port").arg(port.to_string()).current_dir(&site);
+    // --strictPort：端口被占直接报错，不静默换端口（换端口会让用户访问旧端口看到旧项目）
+    cmd.arg("dev").arg(&site).arg("--port").arg(port.to_string()).arg("--strictPort").current_dir(&site);
     if let Some(f) = log_file {
         match f.try_clone() {
             Ok(f2) => { cmd.stderr(f2); }
@@ -574,7 +584,9 @@ fn boot_chain(home: PathBuf, node: PathBuf, site: Option<PathBuf>, port: u16) ->
     cmd.creation_flags(CREATE_NO_WINDOW);
     match cmd.spawn() {
         Ok(c) => {
-            r.child = Some(c);
+            // 写 PID 文件（app 异常退出后下次启动可补杀孤儿）
+            let _ = std::fs::write(site.join("dev-server.pid"), c.id().to_string());
+            r.child = Some((c, site.clone()));
             r.port = port;
         }
         Err(e) => r.error = format!("dev server 启动失败: {e}"),
@@ -589,54 +601,61 @@ pub fn boot_tick(st: &mut ServerState) {
         if let Ok(r) = rx.try_recv() {
             st.boot_done = None;
             if let Some(c) = r.child {
-                st.child = Some(c);
+                st.site_dir = Some(c.1);
+                st.child = Some(c.0);
                 st.port = r.port;
                 st.phase = StartPhase::Running;
+                st.fail_count = 0;
             } else {
                 st.last_error = r.error;
                 st.phase = StartPhase::Failed;
             }
         }
     }
-    // 运行中存活检测：进程死了即失败（读 dev-server.log 尾部拿真实原因）
+    // 运行中存活检测：探测端口而非进程句柄——vitepress.cmd 壳 spawn node 子进程后自己退出，
+    // try_wait 会误判「已退出」，但真服务（node）还活着；端口能连才是真活着。
+    // 连续 3 次探测失败才判死（vitepress config 热重载 restart 瞬间端口短暂断连，单次误判）
     if st.phase == StartPhase::Running {
-        let alive = st.child.as_mut().map(|c| c.try_wait().ok().flatten().is_none()).unwrap_or(false);
-        if !alive {
-            st.child = None;
-            st.port = 0;
-            if st.last_error.is_empty() {
-                st.last_error = read_dev_log_tail();
+        let alive = std::net::TcpStream::connect_timeout(
+            &std::net::SocketAddr::from(([127, 0, 0, 1], st.port)),
+            std::time::Duration::from_millis(500),
+        ).is_ok();
+        if alive {
+            st.fail_count = 0;
+        } else {
+            st.fail_count += 1;
+            if st.fail_count >= 3 {
+                let log_tail = st.site_dir.as_deref().map(read_dev_log_tail).unwrap_or_default();
+                st.child = None;
+                st.port = 0;
+                st.fail_count = 0;
+                if st.last_error.is_empty() {
+                    st.last_error = log_tail;
+                }
+                st.phase = StartPhase::Failed;
             }
-            st.phase = StartPhase::Failed;
         }
     }
 }
 
-/// 读 dev server 日志尾部（进程退出原因）
-fn read_dev_log_tail() -> String {
-    let log = vitepress_home().join("_sites");
-    if let Ok(entries) = std::fs::read_dir(&log) {
-        for e in entries.flatten() {
-            let f = e.path().join("dev-server.log");
-            if f.is_file() {
-                if let Ok(content) = std::fs::read_to_string(&f) {
-                    let tail: String = content
-                        .lines()
-                        .rev()
-                        .take(5)
-                        .collect::<Vec<_>>()
-                        .into_iter()
-                        .rev()
-                        .collect::<Vec<_>>()
-                        .join(" | ");
-                    if !tail.trim().is_empty() {
-                        return format!("dev server 退出：{tail}");
-                    }
-                }
-            }
+/// 读指定站点目录的 dev server 日志尾部（进程退出原因）
+fn read_dev_log_tail(site_dir: &Path) -> String {
+    let f = site_dir.join("dev-server.log");
+    if let Ok(content) = std::fs::read_to_string(&f) {
+        let tail: String = content
+            .lines()
+            .rev()
+            .take(5)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect::<Vec<_>>()
+            .join(" | ");
+        if !tail.trim().is_empty() {
+            return format!("dev server 退出：{tail}");
         }
     }
-    "dev server 进程已退出（查看 vitepress_home/_sites/<项目>/dev-server.log）".into()
+    format!("dev server 进程已退出（查看 {}/dev-server.log）", site_dir.display())
 }
 
 /// 停止：杀整个进程树（vitepress.cmd 是 cmd 壳，真服务在 node 子进程，
@@ -649,6 +668,40 @@ pub fn stop(st: &mut ServerState) {
     st.port = 0;
     st.phase = StartPhase::Idle;
     st.boot_done = None;
+    // 清所有站点目录的 PID 文件（进程已死，标记失效）
+    let sites = vitepress_home().join("_sites");
+    if let Ok(entries) = std::fs::read_dir(&sites) {
+        for e in entries.flatten() {
+            let _ = std::fs::remove_file(e.path().join("dev-server.pid"));
+        }
+    }
+    st.site_dir = None;
+    st.fail_count = 0;
+}
+
+/// 等端口释放（taskkill 后 TCP 回收有延迟；最多等 max_ms 毫秒）
+fn wait_port_free(port: u16, max_ms: u64) {
+    let start = std::time::Instant::now();
+    while start.elapsed().as_millis() < max_ms as u128 {
+        if std::net::TcpListener::bind(("127.0.0.1", port)).is_ok() {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+}
+
+/// 补杀孤儿进程（站点目录 dev-server.pid 记录的 PID；app 异常退出/句柄丢失时兜底）
+fn kill_orphan(site: &Path) {
+    let pid_file = site.join("dev-server.pid");
+    let Ok(content) = std::fs::read_to_string(&pid_file) else { return };
+    let Ok(pid) = content.trim().parse::<u32>() else { return };
+    // 确认进程还活着才杀（PID 可能已被系统回收复用，taskkill 失败无害）
+    let mut cmd = Command::new("taskkill");
+    cmd.args(["/PID", &pid.to_string(), "/T", "/F"]);
+    #[cfg(windows)]
+    cmd.creation_flags(CREATE_NO_WINDOW);
+    let _ = cmd.output();
+    let _ = std::fs::remove_file(&pid_file);
 }
 
 /// 杀进程树（Windows taskkill /T /F；整树连根拔）

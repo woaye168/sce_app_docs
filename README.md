@@ -33,6 +33,14 @@ BGD的SCE项目的本地文档聚合阅读工具：一个 egui 桌面应用，�
 - **文档渲染**：VitePress 2.x（Vite + Vue 3），dev server 模式，全局安装于应用旁 `vitepress_home/`
 - **目录链接**：Windows junction（无需管理员特权）
 
+## CLI 子命令（自测/自动化）
+
+```bash
+sce_app_docs serve --project-path <项目根> [--port <端口>] [--timeout <秒>]
+```
+
+同步阻塞启动 dev server，轮询端口直到就绪/超时/失败后自动清理退出。打印 `OK http://localhost:<port>`（exit 0）或 `FAILED <原因>` / `TIMEOUT`（exit 1）。供 AI 或脚本端到端验证服务可用，无需操作 GUI。
+
 ## 从源码构建
 
 ```bash
