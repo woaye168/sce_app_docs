@@ -28,6 +28,10 @@ impl App {
             &mut self.global_cfg.lan_access,
             "局域网访问（绑 0.0.0.0，手机/其他设备可打开；关闭则只本机可访问）",
         );
+        ui.horizontal(|ui| {
+            ui.label("允许域名（逗号分隔，如 docs.example.com；Cloudflare Tunnel 等反向代理需要）：");
+            ui.text_edit_singleline(&mut self.global_cfg.allowed_hosts);
+        });
 
         ui.add_space(8.0);
         ui.label("全局文档源（所有项目共享；名称唯一，相对路径按项目根解析）：");

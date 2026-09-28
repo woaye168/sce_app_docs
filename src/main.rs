@@ -108,6 +108,9 @@ fn run_cli_serve(args: &[String]) {
     if args.iter().any(|a| a == "--lan") {
         g.lan_access = true;
     }
+    if let Some(h) = get_arg("--allowed-hosts") {
+        g.allowed_hosts = h;
+    }
     let p = config::read_project(&project);
     server::start(&project, &g, &p, &mut st);
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);

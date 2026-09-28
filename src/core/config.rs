@@ -24,6 +24,9 @@ pub struct GlobalConfig {
     /// 局域网访问（true = 绑 0.0.0.0，手机/其他设备可访问；false = 只本机 ::1）
     #[serde(default)]
     pub lan_access: bool,
+    /// 允许域名（逗号分隔，如 "docs.example.com, app.example.com"；vite server.allowedHosts）
+    #[serde(default)]
+    pub allowed_hosts: String,
     /// 全局文档源（所有项目共享）
     #[serde(default)]
     pub sources: Vec<DocSource>,

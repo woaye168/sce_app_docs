@@ -203,6 +203,7 @@ fn write_site_config(
     home: &Path,
     project_root: &Path,
     sources: &[(String, PathBuf)],
+    allowed_hosts: &str,
 ) -> std::io::Result<PathBuf> {
     let dir = home.join("_sites").join(site_dir_name(project_root));
     // 站点目录已存在且是属于其他项目的（同名不同路径）→ 追加短 hash 区分
@@ -331,8 +332,19 @@ fn write_site_config(
     } else {
         format!("    search: {{ provider: '{}' }},\n", tpl.search_provider)
     };
+    // 允许域名（vite 8 allowedHosts 安全校验；逗号分隔转 JS 数组）
+    let hosts: Vec<String> = allowed_hosts.split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .map(|s| format!("'{s}'"))
+        .collect();
+    let allowed_hosts_block = if hosts.is_empty() {
+        String::new()
+    } else {
+        format!("allowedHosts: [{}], ", hosts.join(", "))
+    };
     let cfg_text = format!(
-        "import {{ defineConfig }} from 'vitepress'\n\nexport default defineConfig({{\n  title: '{title}',\n  description: '{description}',\n  lang: '{lang}',\n  lastUpdated: {last_updated},\n  cleanUrls: {clean_urls},\n{src_exclude_block}  rewrites: {{\n{rewrites}\n  }},\n  themeConfig: {{\n{search_block}    sidebar: [\n{sidebar_items}\n    ],\n  }},\n  vite: {{\n    resolve: {{ preserveSymlinks: {preserve_symlinks} }},\n    server: {{ fs: {{ strict: {fs_strict} }}, forwardConsole: {forward_console} }},\n  }},\n}})\n",
+        "import {{ defineConfig }} from 'vitepress'\n\nexport default defineConfig({{\n  title: '{title}',\n  description: '{description}',\n  lang: '{lang}',\n  lastUpdated: {last_updated},\n  cleanUrls: {clean_urls},\n{src_exclude_block}  rewrites: {{\n{rewrites}\n  }},\n  themeConfig: {{\n{search_block}    sidebar: [\n{sidebar_items}\n    ],\n  }},\n  vite: {{\n    resolve: {{ preserveSymlinks: {preserve_symlinks} }},\n    server: {{ {allowed_hosts_block}fs: {{ strict: {fs_strict} }}, forwardConsole: {forward_console} }},\n  }},\n}})\n",
         title = project_name,
         description = tpl.description,
         lang = tpl.lang,
@@ -343,6 +355,7 @@ fn write_site_config(
         search_block = search_block,
         sidebar_items = sidebar_items.join("\n"),
         preserve_symlinks = tpl.preserve_symlinks,
+        allowed_hosts_block = allowed_hosts_block,
         fs_strict = tpl.fs_strict,
         forward_console = tpl.forward_console,
     );
@@ -512,7 +525,7 @@ pub fn start(project_root: &Path, global: &GlobalConfig, project: &ProjectConfig
     st.phase = if home.join("node_modules").is_dir() { StartPhase::Starting } else { StartPhase::InstallingDeps };
     let (tx, rx) = std::sync::mpsc::channel();
     st.boot_done = Some(rx);
-    match write_site_config(&home, project_root, &sources) {
+    match write_site_config(&home, project_root, &sources, &global.allowed_hosts) {
         Ok(site) => {
             // 补杀上次残留的孤儿进程（app 异常退出/句柄丢失时 child 拿不到，靠 PID 文件兜底）
             kill_orphan(&site);
@@ -797,7 +810,7 @@ mod tests {
         let home = std::env::temp_dir().join(format!("bgd_docs_home4_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&home);
         let sources = effective_sources(&tmp, &GlobalConfig::default(), &ProjectConfig::default());
-        let dir = write_site_config(&home, &tmp, &sources).unwrap();
+        let dir = write_site_config(&home, &tmp, &sources, "").unwrap();
         assert!(dir.join(".vitepress/config.mjs").is_file());
         assert!(dir.join("index.md").is_file());
         assert!(dir.join("api").exists()); // junction 到 api_generated
