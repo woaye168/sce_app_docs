@@ -18,7 +18,7 @@ pub struct GlobalConfig {
     /// node.exe 路径（空 = 未配置，启动时自动扫描）
     #[serde(default)]
     pub node_path: String,
-    /// dev server 端口（0 = 默认 8080）
+    /// dev server 端口（0 = 默认 18753）
     #[serde(default)]
     pub port: u16,
     /// 全局文档源（所有项目共享）

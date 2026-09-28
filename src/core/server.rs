@@ -228,6 +228,8 @@ fn write_site_config(
     std::fs::create_dir_all(&dir)?;
     // 标记项目路径（同名不同项目时区分用）
     let _ = std::fs::write(dir.join(".project_root"), project_root.display().to_string());
+    // 清 vite 缓存（vitepress 升级/依赖变化后旧缓存会导致 504 Outdated Optimize Dep）
+    let _ = std::fs::remove_dir_all(dir.join(".vitepress/cache"));
 
     // 多源聚合：junction 到站点根（VitePress 文件路由能扫到 junction 里的 md，
     // 但 vite 默认 fs.strict 会拦 junction 外部路径——需配 fs.strict: false）。
@@ -327,11 +329,19 @@ pub fn start(project_root: &Path, global: &GlobalConfig, project: &ProjectConfig
     st.phase = if home.join("node_modules").is_dir() { StartPhase::Starting } else { StartPhase::InstallingDeps };
     let (tx, rx) = std::sync::mpsc::channel();
     st.boot_done = Some(rx);
-    let site_config = write_site_config(&home, project_root, &sources).ok();
-    std::thread::spawn(move || {
-        let r = boot_chain(home, node, site_config, port);
-        let _ = tx.send(r);
-    });
+    match write_site_config(&home, project_root, &sources) {
+        Ok(site) => {
+            std::thread::spawn(move || {
+                let r = boot_chain(home, node, Some(site), port);
+                let _ = tx.send(r);
+            });
+        }
+        Err(e) => {
+            st.last_error = format!("站点 config 生成失败: {e}");
+            st.phase = StartPhase::Failed;
+            st.boot_done = None;
+        }
+    }
 }
 
 /// 后台链本体：装依赖 → spawn dev（全在独立线程，不卡 UI）

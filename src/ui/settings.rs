@@ -21,7 +21,7 @@ impl App {
             }
         });
         ui.horizontal(|ui| {
-            ui.label("端口（留空=8080）：");
+            ui.label(format!("端口（留空={}）：", crate::core::server::DEFAULT_PORT));
             ui.text_edit_singleline(&mut self.port_edit);
         });
 
