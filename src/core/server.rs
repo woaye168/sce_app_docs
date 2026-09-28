@@ -90,8 +90,7 @@ fn write_site_config(
     let dir = home.join("_sites").join(hash);
     std::fs::create_dir_all(&dir)?;
 
-    // 多源：VuePress 1.x 只能挂一个 docs 根，所以仍用临时目录 + junction 聚合内容层。
-    // 但聚合目录在全局（非项目），项目零侵入。
+    // 多源聚合：junction 链接（VuePress 2.x vite 驱动，符号链接/junction 支持完善）。
     let docs = dir.join("docs");
     std::fs::create_dir_all(&docs)?;
     for (name, src) in sources {
@@ -108,8 +107,9 @@ fn write_site_config(
 
     let cfg = dir.join(".vuepress");
     std::fs::create_dir_all(&cfg)?;
+    // VuePress 2.x config（ESM；vite 驱动；符号链接/junction 原生支持）
     let cfg_text = format!(
-        "module.exports = {{\n  title: '本地文档站',\n  port: {port},\n  themeConfig: {{ sidebar: 'auto', searchMaxSuggestions: 20 }},\n}}\n",
+        "export default {{\n  title: '本地文档站',\n  description: '项目文档聚合',\n  port: {port},\n  theme: {{ sidebar: 'auto' }},\n}}\n",
         port = if port == 0 { 8080 } else { port },
     );
     std::fs::write(cfg.join("config.js"), cfg_text)?;
@@ -135,6 +135,22 @@ fn link_dir(src: &Path, dst: &Path) -> std::io::Result<()> {
 #[cfg(not(windows))]
 fn link_dir(src: &Path, dst: &Path) -> std::io::Result<()> {
     std::os::unix::fs::symlink(src, dst)
+}
+
+/// 目录递归复制（文档源聚合用；md 文件小，秒级完成）
+fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dst)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let from = entry.path();
+        let to = dst.join(entry.file_name());
+        if from.is_dir() {
+            copy_dir_recursive(&from, &to)?;
+        } else {
+            std::fs::copy(&from, &to)?;
+        }
+    }
+    Ok(())
 }
 
 /// 后台启动整条链：装全局依赖（若缺）→ 聚合源写 config → spawn dev server。
@@ -175,11 +191,11 @@ fn boot_chain(home: PathBuf, node: PathBuf, site: Option<PathBuf>, port: u16) ->
         return r;
     };
 
-    // 全局依赖装一次
+    // 全局依赖装一次（VuePress 2.x + vite）
     if !home.join("node_modules").is_dir() {
         let pkg = home.join("package.json");
         if !pkg.exists() {
-            let _ = std::fs::write(&pkg, r#"{"name":"bgd-docs-vuepress","private":true,"devDependencies":{"vuepress":"^1.9.10"}}"#);
+            let _ = std::fs::write(&pkg, r#"{"name":"bgd-docs-vuepress","private":true,"type":"module","devDependencies":{"vuepress":"^2.0.0-rc.20","@vuepress/bundler-vite":"^2.0.0-rc.20"}}"#);
         }
         let npm = node.with_file_name("npm.cmd");
         let mut cmd = Command::new(npm);
