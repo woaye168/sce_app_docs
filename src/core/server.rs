@@ -90,11 +90,10 @@ fn write_site_config(
     let dir = home.join("_sites").join(hash);
     std::fs::create_dir_all(&dir)?;
 
-    // 多源聚合：junction 链接（VuePress 2.x vite 驱动，符号链接/junction 支持完善）。
-    let docs = dir.join("docs");
-    std::fs::create_dir_all(&docs)?;
+    // 多源聚合：junction 链接到站点根（VuePress 2.x source 默认站点根，
+    // 与 .vuepress/ 平级；VuePress 2.x vite 驱动，符号链接/junction 支持完善）。
     for (name, src) in sources {
-        let dst = docs.join(name);
+        let dst = dir.join(name);
         let _ = std::fs::remove_dir_all(&dst);
         link_dir(src, &dst)?;
     }
@@ -103,14 +102,15 @@ fn write_site_config(
     for (name, _) in sources {
         nav.push_str(&format!("- [{name}](/{name}/)\n"));
     }
-    std::fs::write(docs.join("README.md"), nav)?;
+    std::fs::write(dir.join("README.md"), nav)?;
 
     let cfg = dir.join(".vuepress");
     std::fs::create_dir_all(&cfg)?;
-    // VuePress 2.x config（ESM；vite 驱动；符号链接/junction 原生支持）
+    // VuePress 2.x config（ESM；必须显式指定 bundler + theme，否则启动即报
+    // "The bundler or theme option is missing"；lastUpdated/contributors 关掉避免 git 插件刷屏）
     let cfg_text = format!(
-        "export default {{\n  title: '本地文档站',\n  description: '项目文档聚合',\n  port: {port},\n  theme: {{ sidebar: 'auto' }},\n}}\n",
-        port = if port == 0 { 8080 } else { port },
+        "import {{ viteBundler }} from '@vuepress/bundler-vite'\nimport {{ defaultTheme }} from '@vuepress/theme-default'\n\nexport default {{\n  title: '本地文档站',\n  description: '项目文档聚合',\n  port: {port},\n  bundler: viteBundler(),\n  theme: defaultTheme({{ sidebar: 'auto', lastUpdated: false, contributors: false }}),\n}}\n",
+        port = if port == 0 { DEFAULT_PORT } else { port },
     );
     std::fs::write(cfg.join("config.js"), cfg_text)?;
     Ok(dir)
@@ -137,21 +137,8 @@ fn link_dir(src: &Path, dst: &Path) -> std::io::Result<()> {
     std::os::unix::fs::symlink(src, dst)
 }
 
-/// 目录递归复制（文档源聚合用；md 文件小，秒级完成）
-fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
-    std::fs::create_dir_all(dst)?;
-    for entry in std::fs::read_dir(src)? {
-        let entry = entry?;
-        let from = entry.path();
-        let to = dst.join(entry.file_name());
-        if from.is_dir() {
-            copy_dir_recursive(&from, &to)?;
-        } else {
-            std::fs::copy(&from, &to)?;
-        }
-    }
-    Ok(())
-}
+/// 默认端口（18753：本地文档站，避开 8080 等常用端口冲突）
+pub const DEFAULT_PORT: u16 = 18753;
 
 /// 后台启动整条链：装全局依赖（若缺）→ 聚合源写 config → spawn dev server。
 /// 全部在独立线程完成，结果经 channel 回 UI 线程（boot_tick 收）。
@@ -164,7 +151,7 @@ pub fn start(project_root: &Path, global: &GlobalConfig, project: &ProjectConfig
         st.phase = StartPhase::Failed;
         return;
     };
-    let port = if global.port == 0 { 8080 } else { global.port };
+    let port = if global.port == 0 { DEFAULT_PORT } else { global.port };
     let home = vuepress_home();
     let sources = effective_sources(project_root, global, project);
     if sources.is_empty() {
@@ -191,12 +178,14 @@ fn boot_chain(home: PathBuf, node: PathBuf, site: Option<PathBuf>, port: u16) ->
         return r;
     };
 
-    // 全局依赖装一次（VuePress 2.x + vite）
-    if !home.join("node_modules").is_dir() {
-        let pkg = home.join("package.json");
-        if !pkg.exists() {
-            let _ = std::fs::write(&pkg, r#"{"name":"bgd-docs-vuepress","private":true,"type":"module","devDependencies":{"vuepress":"^2.0.0-rc.20","@vuepress/bundler-vite":"^2.0.0-rc.20"}}"#);
-        }
+    // 全局依赖（VuePress 2.x + vite + defaultTheme + sass-embedded）；
+    // package.json 每次重写（依赖清单变化要生效），node_modules 缺包才跑 install
+    let pkg = home.join("package.json");
+    let _ = std::fs::write(&pkg, r#"{"name":"bgd-docs-vuepress","private":true,"type":"module","devDependencies":{"vuepress":"^2.0.0-rc.20","@vuepress/bundler-vite":"^2.0.0-rc.20","@vuepress/theme-default":"^2.0.0-rc.20","sass-embedded":"^1.77.0"}}"#);
+    let need_install = !home.join("node_modules").is_dir()
+        || !home.join("node_modules/@vuepress/theme-default").is_dir()
+        || !home.join("node_modules/sass-embedded").is_dir();
+    if need_install {
         let npm = node.with_file_name("npm.cmd");
         let mut cmd = Command::new(npm);
         cmd.arg("install").current_dir(&home);
@@ -216,9 +205,21 @@ fn boot_chain(home: PathBuf, node: PathBuf, site: Option<PathBuf>, port: u16) ->
     }
 
     // spawn dev server（全局 vuepress 二进制跑项目站点目录）
+    // stderr 落日志文件（进程退出时 UI 能读到真实原因，不再只猜「端口占用」）
     let vp = home.join("node_modules/.bin/vuepress.cmd");
+    let log_path = site.join("dev-server.log");
+    let log_file = std::fs::File::create(&log_path)
+        .map_err(|e| format!("dev server 日志创建失败: {e}"))
+        .ok();
     let mut cmd = Command::new(vp);
     cmd.args(["dev", "."]).current_dir(&site);
+    if let Some(f) = log_file {
+        match f.try_clone() {
+            Ok(f2) => { cmd.stderr(f2); }
+            Err(_) => { cmd.stderr(std::process::Stdio::null()); }
+        }
+        cmd.stdout(f);
+    }
     #[cfg(windows)]
     cmd.creation_flags(CREATE_NO_WINDOW);
     match cmd.spawn() {
@@ -247,18 +248,46 @@ pub fn boot_tick(st: &mut ServerState) {
             }
         }
     }
-    // 运行中存活检测：进程死了即失败（状态一致）
+    // 运行中存活检测：进程死了即失败（读 dev-server.log 尾部拿真实原因）
     if st.phase == StartPhase::Running {
         let alive = st.child.as_mut().map(|c| c.try_wait().ok().flatten().is_none()).unwrap_or(false);
         if !alive {
             st.child = None;
             st.port = 0;
             if st.last_error.is_empty() {
-                st.last_error = "dev server 进程已退出（查看端口占用/站点目录）".into();
+                st.last_error = read_dev_log_tail();
             }
             st.phase = StartPhase::Failed;
         }
     }
+}
+
+/// 读 dev server 日志尾部（进程退出原因）
+fn read_dev_log_tail() -> String {
+    let log = vuepress_home().join("_sites");
+    // 找到最近的 dev-server.log（当前站点目录下）
+    if let Ok(entries) = std::fs::read_dir(&log) {
+        for e in entries.flatten() {
+            let f = e.path().join("dev-server.log");
+            if f.is_file() {
+                if let Ok(content) = std::fs::read_to_string(&f) {
+                    let tail: String = content
+                        .lines()
+                        .rev()
+                        .take(5)
+                        .collect::<Vec<_>>()
+                        .into_iter()
+                        .rev()
+                        .collect::<Vec<_>>()
+                        .join(" | ");
+                    if !tail.trim().is_empty() {
+                        return format!("dev server 退出：{tail}");
+                    }
+                }
+            }
+        }
+    }
+    "dev server 进程已退出（查看 vuepress_home/_sites/<项目>/dev-server.log）".into()
 }
 
 /// 停止：杀整个进程树（vuepress.cmd 是 cmd 壳，真服务在 node 子进程，
@@ -330,7 +359,7 @@ mod tests {
         let sources = effective_sources(&tmp, &GlobalConfig::default(), &ProjectConfig::default());
         let dir = write_site_config(&home, &tmp, &sources, 8080).unwrap();
         assert!(dir.join(".vuepress/config.js").is_file());
-        assert!(dir.join("docs/api").exists()); // junction 到 api_generated
+        assert!(dir.join("api").exists()); // junction 到 api_generated
         let _ = std::fs::remove_dir_all(&tmp);
         let _ = std::fs::remove_dir_all(&home);
     }
