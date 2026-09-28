@@ -1,0 +1,51 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Inject version from tag
+        shell: pwsh
+        run: |
+          $ver = "${{ github.ref_name }}".TrimStart('v')
+          $cargo = Get-Content Cargo.toml -Raw
+          $cargo = $cargo -replace '(?m)^version = "[^"]*"', "version = `"$ver`""
+          Set-Content Cargo.toml $cargo -NoNewline -Encoding utf8
+          $notes = git log --pretty=format:"- %s (``%h``)" -n 20 --no-merges | Out-String
+          $notes | Set-Content release_notes.md -Encoding utf8
+
+      - name: Build release
+        run: cargo build --release
+
+      - name: Generate app-release.json
+        shell: pwsh
+        run: |
+          $meta = Get-Content app.json -Raw -Encoding utf8 | ConvertFrom-Json
+          $meta | Add-Member -NotePropertyName version -NotePropertyValue ("${{ github.ref_name }}".TrimStart('v'))
+          $meta | Add-Member -NotePropertyName release_notes -NotePropertyValue (Get-Content release_notes.md -Raw -Encoding utf8)
+          $meta | ConvertTo-Json -Depth 5 | Set-Content app-release.json -Encoding utf8
+
+      - name: Upload Release
+        uses: softprops/action-gh-release@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: sce_app_docs ${{ github.ref_name }}
+          files: |
+            target/release/sce_app_docs.exe
+            app-release.json
