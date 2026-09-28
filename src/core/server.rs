@@ -347,8 +347,13 @@ fn write_site_config(
     } else {
         format!("allowedHosts: [{}], ", hosts.join(", "))
     };
+    // 随机构建 ID：每次启动变，vite 认为配置变了 → 重新预构建依赖 → 模块 hash 变 → 浏览器缓存失效
+    let build_id = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
     let cfg_text = format!(
-        "import {{ defineConfig }} from 'vitepress'\n\n// vite 插件：覆盖 /@fs/ 路径的缓存头（vite 内部硬编码 max-age=14400，Cloudflare 会缓存旧模块）\nconst noCacheFs = {{\n  name: 'no-cache-fs',\n  configureServer(server) {{\n    server.middlewares.use((req, res, next) => {{\n      if (req.url.startsWith('/@fs/')) {{\n        res.setHeader('Cache-Control', 'no-cache');\n      }}\n      next();\n    }});\n  }},\n}};\n\nexport default defineConfig({{\n  title: '{title}',\n  description: '{description}',\n  lang: '{lang}',\n  lastUpdated: {last_updated},\n  cleanUrls: {clean_urls},\n{src_exclude_block}  rewrites: {{\n{rewrites}\n  }},\n  themeConfig: {{\n{search_block}    sidebar: [\n{sidebar_items}\n    ],\n  }},\n  vite: {{\n    plugins: [noCacheFs],\n    resolve: {{ preserveSymlinks: {preserve_symlinks} }},\n    server: {{ {allowed_hosts_block}fs: {{ strict: {fs_strict} }}, forwardConsole: {forward_console}, headers: {{ 'Cache-Control': 'no-cache' }} }},\n  }},\n}})\n",
+        "import {{ defineConfig }} from 'vitepress'\n\n// vite 插件：覆盖 /@fs/ 路径的缓存头（vite 内部硬编码 max-age=14400，Cloudflare 会缓存旧模块）\nconst noCacheFs = {{\n  name: 'no-cache-fs',\n  configureServer(server) {{\n    server.middlewares.use((req, res, next) => {{\n      if (req.url.startsWith('/@fs/')) {{\n        res.setHeader('Cache-Control', 'no-cache');\n      }}\n      next();\n    }});\n  }},\n}};\n\nexport default defineConfig({{\n  title: '{title}',\n  description: '{description}',\n  lang: '{lang}',\n  lastUpdated: {last_updated},\n  cleanUrls: {clean_urls},\n{src_exclude_block}  rewrites: {{\n{rewrites}\n  }},\n  themeConfig: {{\n{search_block}    sidebar: [\n{sidebar_items}\n    ],\n  }},\n  vite: {{\n    plugins: [noCacheFs],\n    define: {{ __DOCS_BUILD_ID__: '{build_id}' }},\n    resolve: {{ preserveSymlinks: {preserve_symlinks} }},\n    server: {{ {allowed_hosts_block}fs: {{ strict: {fs_strict} }}, forwardConsole: {forward_console}, headers: {{ 'Cache-Control': 'no-cache' }} }},\n  }},\n}})\n",
         title = project_name,
         description = tpl.description,
         lang = tpl.lang,
@@ -359,6 +364,7 @@ fn write_site_config(
         search_block = search_block,
         sidebar_items = sidebar_items.join("\n"),
         preserve_symlinks = tpl.preserve_symlinks,
+        build_id = build_id,
         allowed_hosts_block = allowed_hosts_block,
         fs_strict = tpl.fs_strict,
         forward_console = tpl.forward_console,
