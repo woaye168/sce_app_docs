@@ -233,14 +233,17 @@ fn write_site_config(
 
     // 多源聚合：junction 到站点根（VitePress 文件路由能扫到 junction 里的 md，
     // 但 vite 默认 fs.strict 会拦 junction 外部路径——需配 fs.strict: false）。
+    // 不生成任何文件到源目录（显示工具不该改文档）。
     for (name, src) in sources {
         let dst = dir.join(name);
         let _ = std::fs::remove_dir_all(&dst);
         link_dir(src, &dst)?;
     }
     // 首页（每次重写：源清单变化要反映在导航上）
-    // 链接不带 ./ 前缀（VitePress 路由基于站点根）
-    let mut nav = String::from("# 本地文档站\n\n左侧边栏选择文档分类。\n\n## 文档源\n\n");
+    let project_name = project_root.file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| "项目".into());
+    let mut nav = format!("# {project_name} 文档\n\n左侧边栏选择文档分类。\n\n## 文档源\n\n");
     for (name, _) in sources {
         nav.push_str(&format!("- [{name}](/{name}/)\n"));
     }
@@ -250,28 +253,104 @@ fn write_site_config(
     let tpl = read_site_template(home);
     let cfg = dir.join(".vitepress");
     std::fs::create_dir_all(&cfg)?;
-    // 每个源的 README.md 都映射成 index.md（VitePress 2.x 不再自动识别 README）
-    let rewrites: Vec<String> = sources.iter().map(|(name, _)| format!("    '{name}/README.md': '{name}/index.md',")).collect();
+    // rewrites：每个源的首页文件映射成 index.md（VitePress 2.x 不自动识别 README/AGENTS）
+    let mut rewrites: Vec<String> = Vec::new();
+    let mut sidebar_items: Vec<String> = Vec::new();
+    for (name, src) in sources {
+        // 首页映射：index > README > AGENTS（不区分大小写）
+        if let Some(home_file) = find_home_file(src) {
+            rewrites.push(format!("    '{name}/{home_file}': '{name}/index.md',"));
+        }
+        // 递归扫描 md 文件生成 sidebar（多级目录嵌套，目录无首页时纯分组不跳转）
+        let mut items = String::new();
+        scan_md_recursive(src, src, name, &mut items);
+        let dir_link = if find_home_file(src).is_some() {
+            format!(", link: '/{name}/'")
+        } else {
+            String::new()
+        };
+        if !items.is_empty() {
+            sidebar_items.push(format!("      {{ text: '{name}'{dir_link}, items: [\n{items}      ] }},"));
+        } else if find_home_file(src).is_some() {
+            sidebar_items.push(format!("      {{ text: '{name}', link: '/{name}/' }},"));
+        } else {
+            sidebar_items.push(format!("      {{ text: '{name}' }},"));
+        }
+    }
     let search_block = if tpl.search_provider.is_empty() {
         String::new()
     } else {
         format!("    search: {{ provider: '{}' }},\n", tpl.search_provider)
     };
     let cfg_text = format!(
-        "import {{ defineConfig }} from 'vitepress'\n\nexport default defineConfig({{\n  title: '{title}',\n  description: '{description}',\n  lang: '{lang}',\n  lastUpdated: {last_updated},\n  cleanUrls: {clean_urls},\n  rewrites: {{\n{rewrites}\n  }},\n  themeConfig: {{\n{search_block}    sidebar: [],\n  }},\n  vite: {{\n    resolve: {{ preserveSymlinks: {preserve_symlinks} }},\n    server: {{ fs: {{ strict: {fs_strict} }}, forwardConsole: {forward_console} }},\n  }},\n}})\n",
-        title = tpl.title,
+        "import {{ defineConfig }} from 'vitepress'\n\nexport default defineConfig({{\n  title: '{title}',\n  description: '{description}',\n  lang: '{lang}',\n  lastUpdated: {last_updated},\n  cleanUrls: {clean_urls},\n  rewrites: {{\n{rewrites}\n  }},\n  themeConfig: {{\n{search_block}    sidebar: [\n{sidebar_items}\n    ],\n  }},\n  vite: {{\n    resolve: {{ preserveSymlinks: {preserve_symlinks} }},\n    server: {{ fs: {{ strict: {fs_strict} }}, forwardConsole: {forward_console} }},\n  }},\n}})\n",
+        title = project_name,
         description = tpl.description,
         lang = tpl.lang,
         last_updated = tpl.last_updated,
         clean_urls = tpl.clean_urls,
         rewrites = rewrites.join("\n"),
         search_block = search_block,
+        sidebar_items = sidebar_items.join("\n"),
         preserve_symlinks = tpl.preserve_symlinks,
         fs_strict = tpl.fs_strict,
         forward_console = tpl.forward_console,
     );
     std::fs::write(cfg.join("config.mjs"), cfg_text)?;
     Ok(dir)
+}
+
+/// 目录首页文件查找：index.md > README.md > AGENTS.md（不区分大小写）
+fn find_home_file(dir: &Path) -> Option<String> {
+    let candidates = ["index.md", "README.md", "AGENTS.md"];
+    for c in candidates {
+        if dir.join(c).exists() {
+            return Some(c.to_string());
+        }
+    }
+    // 不区分大小写兜底（INDEX.md / Readme.md / Agents.md 等）
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for e in entries.flatten() {
+            let fname = e.file_name().to_string_lossy().to_lowercase();
+            if fname == "index.md" || fname == "readme.md" || fname == "agents.md" {
+                return Some(e.file_name().to_string_lossy().to_string());
+            }
+        }
+    }
+    None
+}
+
+/// 递归扫描 md 文件生成 sidebar 项（多级目录嵌套，目录无首页时纯分组不跳转）
+fn scan_md_recursive(base: &Path, dir: &Path, source_name: &str, out: &mut String) {
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    let mut files: Vec<_> = entries.flatten().collect();
+    files.sort_by_key(|e| e.file_name());
+    for entry in files {
+        let path = entry.path();
+        let fname = entry.file_name().to_string_lossy().to_string();
+        if path.is_dir() {
+            // 子目录：递归扫描，生成嵌套 items
+            let mut sub_items = String::new();
+            scan_md_recursive(base, &path, source_name, &mut sub_items);
+            if !sub_items.is_empty() {
+                let rel = path.strip_prefix(base).unwrap_or(&path).display().to_string().replace('\\', "/");
+                let dir_link = if find_home_file(&path).is_some() {
+                    format!(", link: '/{source_name}/{rel}/'")
+                } else {
+                    String::new()
+                };
+                out.push_str(&format!("        {{ text: '{fname}'{dir_link}, collapsed: true, items: [\n{sub_items}        ] }},\n"));
+            }
+        } else if path.extension().map(|e| e == "md").unwrap_or(false) {
+            let stem = fname.strip_suffix(".md").unwrap_or(&fname);
+            // 首页文件不进 sidebar（作为目录索引页，不占导航位）
+            let lower = stem.to_lowercase();
+            if lower == "readme" || lower == "index" || lower == "agents" { continue; }
+            let rel = path.strip_prefix(base).unwrap_or(&path).display().to_string().replace('\\', "/");
+            let link = format!("/{source_name}/{}", rel.strip_suffix(".md").unwrap_or(&rel));
+            out.push_str(&format!("        {{ text: '{stem}', link: '{link}' }},\n"));
+        }
+    }
 }
 
 /// 判断已装 vitepress 是否为 2.x（读 node_modules/vitepress/package.json 版本号）
