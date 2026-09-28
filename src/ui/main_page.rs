@@ -5,8 +5,8 @@ use crate::App;
 
 impl App {
     pub(crate) fn ui_main(&mut self, ui: &mut egui::Ui) {
-        // 轮询后台启动进度（装依赖完成续起 dev server）
-        server::start_tick(&mut self.server);
+        // 轮询后台启动链结果 + 运行中存活检测
+        server::boot_tick(&mut self.server);
 
         ui.heading("本地文档站");
         ui.label("VuePress 本地文档服务：聚合框架 API 文档 + 项目文档，浏览器阅读。");
@@ -20,7 +20,7 @@ impl App {
 
         let phase = self.server.phase.clone();
         let busy = matches!(phase, server::StartPhase::InstallingDeps | server::StartPhase::Starting);
-        let running = phase == server::StartPhase::Running && server::is_running(&mut self.server);
+        let running = phase == server::StartPhase::Running;
 
         ui.horizontal(|ui| {
             if running {
@@ -44,7 +44,7 @@ impl App {
         match phase {
             server::StartPhase::Running if running => {
                 ui.label(format!("运行中：http://localhost:{}", self.server.port));
-                ui.label(format!("站点目录：{}", server::site_dir(&project).display()));
+                ui.label(format!("VuePress 目录：{}", server::vuepress_home().display()));
             }
             server::StartPhase::InstallingDeps => {
                 ui.label("正在安装依赖（npm install，首次需几分钟）…");
