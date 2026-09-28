@@ -104,12 +104,26 @@ fn write_site_config(
     }
     std::fs::write(dir.join("index.md"), nav)?;
 
-    // VitePress config（ESM；本地搜索内置 minisearch，无需额外插件）
+    // VitePress config（ESM；本地搜索内置 minisearch，无需额外插件；
+    // preserveSymlinks: 不 realpath junction（防路由被算成真实物理路径而 404）；
+    // fs.strict=false: 放行 junction 指向的站点外路径；
+    // cleanUrls=false: VitePress 2.x 的 cleanUrls 和 junction 有冲突（/api/ 404）；
+    // rewrites: VitePress 2.x 不再把 README.md 当 index 页，需显式映射）
     let cfg = dir.join(".vitepress");
     std::fs::create_dir_all(&cfg)?;
-    let cfg_text = "import { defineConfig } from 'vitepress'\n\nexport default defineConfig({\n  title: '本地文档站',\n  description: '项目文档聚合',\n  lang: 'zh-CN',\n  lastUpdated: false,\n  cleanUrls: true,\n  themeConfig: {\n    search: { provider: 'local' },\n    sidebar: [],\n  },\n  vite: { server: { fs: { strict: false } } },\n})\n".to_string();
+    // 每个源的 README.md 都映射成 index.md（VitePress 2.x 不再自动识别 README）
+    let rewrites: Vec<String> = sources.iter().map(|(name, _)| format!("    '{name}/README.md': '{name}/index.md',")).collect();
+    let cfg_text = format!("import {{ defineConfig }} from 'vitepress'\n\nexport default defineConfig({{\n  title: '本地文档站',\n  description: '项目文档聚合',\n  lang: 'zh-CN',\n  lastUpdated: false,\n  cleanUrls: false,\n  rewrites: {{\n{}\n  }},\n  themeConfig: {{\n    search: {{ provider: 'local' }},\n    sidebar: [],\n  }},\n  vite: {{\n    resolve: {{ preserveSymlinks: true }},\n    server: {{ fs: {{ strict: false }} }},\n  }},\n}})\n", rewrites.join("\n"));
     std::fs::write(cfg.join("config.mjs"), cfg_text)?;
     Ok(dir)
+}
+
+/// 判断已装 vitepress 是否为 2.x（读 node_modules/vitepress/package.json 版本号）
+fn is_vitepress_v2(home: &Path) -> bool {
+    let pkg = home.join("node_modules/vitepress/package.json");
+    let Ok(content) = std::fs::read_to_string(&pkg) else { return false };
+    // 粗匹配 "version": "2.xxx"
+    content.contains("\"version\": \"2.")
 }
 
 /// 目录链接（junction 优先，失败降级 symlink）
@@ -174,11 +188,12 @@ fn boot_chain(home: PathBuf, node: PathBuf, site: Option<PathBuf>, port: u16) ->
         return r;
     };
 
-    // 全局依赖（VitePress 单包，内置 minisearch 本地搜索）；
+    // 全局依赖（VitePress 2.x alpha，内置 minisearch 本地搜索）；
     // package.json 每次重写（依赖清单变化要生效），node_modules 缺包才跑 install
     let pkg = home.join("package.json");
-    let _ = std::fs::write(&pkg, r#"{"name":"bgd-docs-vitepress","private":true,"type":"module","devDependencies":{"vitepress":"^1.6.3"}}"#);
-    let need_install = !home.join("node_modules/vitepress").is_dir();
+    let _ = std::fs::write(&pkg, r#"{"name":"bgd-docs-vitepress","private":true,"type":"module","devDependencies":{"vitepress":"^2.0.0-alpha.20"}}"#);
+    let need_install = !home.join("node_modules/vitepress").is_dir()
+        || !is_vitepress_v2(&home);
     if need_install {
         let npm = node.with_file_name("npm.cmd");
         let mut cmd = Command::new(npm);
