@@ -15,6 +15,10 @@ BGD的SCE项目的本地文档聚合阅读工具：一个 egui 桌面应用，�
 - **局域网访问**：可选绑定 `0.0.0.0`，手机/其他设备直接打开
 - **域名白名单**：配合 Cloudflare Tunnel 等反向代理，界面配置域名 + 开关
 - **配置化**：站点模板（`vitepress_home/site_template.json`）可手改覆盖标题/搜索/链接风格等
+- **语义检索**：文档分块 → 本地向量模型（bge-m3，免 API 费用）→ sqlite 向量库增量索引，`/_api/search` 开箱可用
+- **AI 问答**：右下角毛玻璃问答面板——多轮 Tool Calling（LLM 自主检索文档、思考链/工具调用可视化、回答附出处链接），明暗主题跟随；LLM 走你自己的中转站（OpenAI 兼容接口）
+- **MCP 端点**：`/_mcp`（Streamable HTTP）暴露 search_docs/get_doc/list_sources 三个只读工具，接回 Trae 等 agent 形成「文档 → 反哺开发」闭环
+- **安全边界**：检索/问答/MCP 全部只读文档库，不能执行命令、不能写文件、不能读任意路径
 
 ## 安装与使用
 
@@ -38,14 +42,17 @@ BGD的SCE项目的本地文档聚合阅读工具：一个 egui 桌面应用，�
 - **内嵌服务**：tiny_http（静态文件托管 + Host 白名单 + 缓存策略），端口随进程生命周期
 - **构建隔离**：vitepress build 短命子进程 + Windows Job Object（KILL_ON_JOB_CLOSE），app 异常退出也无孤儿
 - **目录链接**：Windows junction（无需管理员特权）
+- **向量检索**：fastembed-rs 本地跑 bge-m3 + bge-reranker-v2-m3（user-defined 加载，支持导入预下载模型），sqlite 持久化 + 内存暴力余弦（文档量小，毫秒级）
+- **LLM**：reqwest 流式 SSE（OpenAI 兼容 / reasoning_content / tool_calls）
 
 ## CLI 子命令（自测/自动化）
 
 ```bash
 sce_app_docs serve --project-path <项目根> [--port <端口>] [--lan] [--allowed-hosts <域名>]
+                   [--llm-base <URL>] [--llm-key <KEY>] [--llm-model <模型>]
 ```
 
-前台常驻：构建完成后打印 `OK http://localhost:<port>` 并持续服务（md 变更自动重建），kill/Ctrl+C 即停（端口随进程释放）；失败 `FAILED <原因>`（exit 1）。供 AI 或脚本端到端验证，无需操作 GUI。
+前台常驻：构建完成后打印 `OK http://localhost:<port>` 并持续服务（md 变更自动重建 + 索引增量），kill/Ctrl+C 即停（端口随进程释放）；失败 `FAILED <原因>`（exit 1）。LLM 参数继承 GUI 配置、命令行可覆盖。供 AI 或脚本端到端验证，无需操作 GUI。
 
 ## 测试
 

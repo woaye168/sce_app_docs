@@ -6,11 +6,29 @@
 //! - 路径映射："/" → index.html；目录 → index.html；无扩展名 → 尝试 .html（cleanUrls: false 约定）
 //! - 服务根是 Arc<RwLock<PathBuf>>：构建完成后原子翻转，重建期间旧内容不掉线
 
+use crate::core::indexer::{self, SearchCtx, SharedIndexStatus};
+use crate::core::{ask, llm, mcp};
 use std::net::IpAddr;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
+
+/// API 共享状态（/_api/* 路由用）
+pub struct ApiState {
+    /// 索引状态（/_api/index_status）
+    pub status: SharedIndexStatus,
+    /// 检索上下文（模型懒加载；Mutex 串行化，文档站 QPS 低无瓶颈）
+    pub search: Mutex<SearchCtx>,
+    /// rerank 开关
+    pub use_rerank: bool,
+    /// LLM 配置（/_api/ask；空 = 未配置）
+    pub llm: llm::LlmConfig,
+    /// 最大工具调用轮数
+    pub max_rounds: usize,
+    /// MCP 会话管理（/_mcp）
+    pub mcp_sessions: Mutex<mcp::SessionMgr>,
+}
 
 /// 内嵌 HTTP 服务句柄（drop 即停）
 pub struct Httpd {
@@ -38,6 +56,7 @@ pub fn start(
     port: u16,
     lan: bool,
     allowed_hosts: Vec<String>,
+    api: Option<Arc<ApiState>>,
 ) -> Result<Httpd, String> {
     let addr = if lan { format!("0.0.0.0:{port}") } else { format!("127.0.0.1:{port}") };
     if lan {
@@ -59,7 +78,7 @@ pub fn start(
         let Ok(Some(req)) = server.recv_timeout(Duration::from_millis(200)) else {
             continue;
         };
-        handle_request(req, &root, &allowed_hosts);
+        handle_request(req, &root, &allowed_hosts, &api);
     });
     Ok(Httpd { stop, handle: Some(handle), port })
 }
@@ -85,7 +104,7 @@ fn host_allowed(host_header: Option<&str>, allowed: &[String]) -> bool {
     allowed.iter().any(|a| a.eq_ignore_ascii_case(host))
 }
 
-fn handle_request(req: tiny_http::Request, root: &Arc<RwLock<PathBuf>>, allowed: &[String]) {
+fn handle_request(req: tiny_http::Request, root: &Arc<RwLock<PathBuf>>, allowed: &[String], api: &Option<Arc<ApiState>>) {
     // Host 白名单校验
     let host = req.headers().iter().find(|h| h.field.equiv("Host")).map(|h| h.value.to_string());
     if !host_allowed(host.as_deref(), allowed) {
@@ -95,7 +114,18 @@ fn handle_request(req: tiny_http::Request, root: &Arc<RwLock<PathBuf>>, allowed:
         ).with_status_code(403));
         return;
     }
+    let full_url = req.url().to_string();
     let url = req.url().split('?').next().unwrap_or("/").to_string();
+    // MCP 端点（/_mcp；同样避开文档路由）
+    if url == "/_mcp" {
+        route_mcp(req, api);
+        return;
+    }
+    // API 路由（/_api/ 前缀：站点文档源占用了 /api/，必须避开）
+    if url.starts_with("/_api/") {
+        route_api(req, &url, &full_url, api);
+        return;
+    }
     let Some(rel) = resolve_path(&url) else {
         let _ = req.respond(tiny_http::Response::from_string("403 Forbidden").with_status_code(403));
         return;
@@ -132,6 +162,179 @@ fn handle_request(req: tiny_http::Request, root: &Arc<RwLock<PathBuf>>, allowed:
     let _ = req.respond(resp);
 }
 
+/// JSON 响应助手
+fn respond_json(req: tiny_http::Request, status: u16, body: String) {
+    let resp = tiny_http::Response::from_string(body)
+        .with_status_code(status)
+        .with_header(tiny_http::Header::from_bytes("Content-Type", "application/json; charset=utf-8").unwrap());
+    let _ = req.respond(resp);
+}
+
+/// API 路由：/_api/index_status、/_api/search?q=&k=
+fn route_api(req: tiny_http::Request, path: &str, full_url: &str, api: &Option<Arc<ApiState>>) {
+    let Some(api) = api else {
+        respond_json(req, 503, r#"{"error":"API 未启用"}"#.into());
+        return;
+    };
+    match path {
+        "/_api/index_status" => {
+            let s = api.status.read().map(|s| serde_json::to_string(&*s).unwrap_or_default()).unwrap_or_default();
+            respond_json(req, 200, s);
+        }
+        "/_api/llm_status" => {
+            let configured = !api.llm.base_url.is_empty() && !api.llm.api_key.is_empty() && !api.llm.model.is_empty();
+            respond_json(req, 200, serde_json::json!({"configured": configured, "model": api.llm.model}).to_string());
+        }
+        "/_api/search" => {
+            let q = query_param(full_url, "q").unwrap_or_default();
+            let k: usize = query_param(full_url, "k").and_then(|v| v.parse().ok()).unwrap_or(5);
+            if q.is_empty() {
+                respond_json(req, 400, r#"{"error":"缺少 q 参数"}"#.into());
+                return;
+            }
+            let mut ctx = match api.search.lock() {
+                Ok(c) => c,
+                Err(_) => {
+                    respond_json(req, 500, r#"{"error":"检索上下文锁失败"}"#.into());
+                    return;
+                }
+            };
+            match indexer::search_with_kb(&mut ctx, &q, k, api.use_rerank) {
+                Ok(hits) => respond_json(req, 200, serde_json::to_string(&hits).unwrap_or_default()),
+                Err(e) => respond_json(req, 500, serde_json::to_string(&serde_json::json!({"error": e})).unwrap_or_default()),
+            }
+        }
+        "/_api/ask" => route_ask(req, api),
+        _ => respond_json(req, 404, r#"{"error":"未知 API"}"#.into()),
+    }
+}
+
+/// /_mcp 路由（Streamable HTTP）：POST JSON-RPC；GET 服务端推送流不支持 → 405（协议合规）
+fn route_mcp(mut req: tiny_http::Request, api: &Option<Arc<ApiState>>) {
+    use std::io::Read;
+    let Some(api) = api else {
+        respond_json(req, 503, r#"{"error":"API 未启用"}"#.into());
+        return;
+    };
+    if req.method().as_str() == "GET" {
+        let _ = req.respond(tiny_http::Response::empty(405));
+        return;
+    }
+    let session = req.headers().iter().find(|h| h.field.equiv("Mcp-Session-Id")).map(|h| h.value.to_string());
+    let want_sse = req
+        .headers()
+        .iter()
+        .find(|h| h.field.equiv("Accept"))
+        .map(|h| h.value.as_str().contains("text/event-stream"))
+        .unwrap_or(false);
+    let mut body = String::new();
+    if req.as_reader().read_to_string(&mut body).is_err() {
+        respond_json(req, 400, r#"{"error":"读 body 失败"}"#.into());
+        return;
+    }
+    let msg: serde_json::Value = match serde_json::from_str(&body) {
+        Ok(v) => v,
+        Err(_) => {
+            respond_json(req, 400, r#"{"jsonrpc":"2.0","id":null,"error":{"code":-32700,"message":"JSON 解析失败"}}"#.into());
+            return;
+        }
+    };
+    tracing::info!("mcp: {} (session={})", msg.get("method").and_then(|m| m.as_str()).unwrap_or("?"), session.as_deref().unwrap_or("-"));
+    let (new_session, resp) = mcp::handle_message(api, &api.mcp_sessions, session.as_deref(), &msg);
+    let Some(resp) = resp else {
+        // 通知类：202 无 body
+        let _ = req.respond(tiny_http::Response::empty(202));
+        return;
+    };
+    let (text, content_type) = mcp::wrap_response(&resp, want_sse);
+    let mut response = tiny_http::Response::from_string(text)
+        .with_status_code(200)
+        .with_header(tiny_http::Header::from_bytes("Content-Type", content_type).unwrap());
+    if let Some(sid) = new_session {
+        response = response.with_header(tiny_http::Header::from_bytes("Mcp-Session-Id", sid.as_str()).unwrap());
+    }
+    let _ = req.respond(response);
+}
+
+/// AskEvent → SSE 帧 JSON
+fn ask_event_json(ev: &ask::AskEvent) -> String {
+    let v = match ev {
+        ask::AskEvent::Think(t) => serde_json::json!({"type": "think", "text": t}),
+        ask::AskEvent::Delta(d) => serde_json::json!({"type": "delta", "text": d}),
+        ask::AskEvent::ToolStart { name, args } => serde_json::json!({"type": "tool_start", "name": name, "args": args}),
+        ask::AskEvent::ToolCall { name, args, summary } => {
+            serde_json::json!({"type": "tool_call", "name": name, "args": args, "summary": summary})
+        }
+        ask::AskEvent::Sources(hits) => serde_json::json!({"type": "sources", "hits": hits}),
+        ask::AskEvent::Done => serde_json::json!({"type": "done"}),
+    };
+    v.to_string()
+}
+
+/// /_api/ask：POST {question, history} → SSE 流式回答
+fn route_ask(mut req: tiny_http::Request, api: &Arc<ApiState>) {
+    use std::io::Read;
+    // 读 POST body
+    let mut body = String::new();
+    if let Err(e) = req.as_reader().read_to_string(&mut body) {
+        respond_json(req, 400, serde_json::json!({"error": format!("读 body 失败: {e}")}).to_string());
+        return;
+    }
+    let payload: serde_json::Value = serde_json::from_str(&body).unwrap_or(serde_json::json!({}));
+    let question = payload.get("question").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let history = payload.get("history").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+    if question.is_empty() {
+        respond_json(req, 400, r#"{"error":"缺少 question"}"#.into());
+        return;
+    }
+    if api.llm.base_url.is_empty() || api.llm.api_key.is_empty() || api.llm.model.is_empty() {
+        respond_json(req, 400, r#"{"error":"LLM 未配置（AI 设置页填 base_url/api_key/model）"}"#.into());
+        return;
+    }
+    // 拿走裸 writer 手写 SSE（CGI 式）：tiny_http 的 Response chunked 输出不 flush 会合批
+    //（浏览器实测 6s 攒一个包——「卡住感」根因），必须逐帧 write + flush
+    let mut w = req.into_writer();
+    let api2 = api.clone();
+    std::thread::spawn(move || {
+        use std::io::Write;
+        tracing::info!("ask 开始: {}", question.chars().take(80).collect::<String>());
+        if w.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream; charset=utf-8\r\nCache-Control: no-cache\r\nConnection: close\r\n\r\n").is_err() {
+            return;
+        }
+        let mut send = |w: &mut Box<dyn Write + Send>, v: String| -> bool {
+            w.write_all(format!("data: {v}\n\n").as_bytes()).is_ok() && w.flush().is_ok()
+        };
+        if !send(&mut w, r#"{"type":"start"}"#.into()) {
+            return;
+        }
+        let r = {
+            let mut wref = &mut w;
+            ask::ask(&api2.search, &api2.llm, &question, history, api2.max_rounds, api2.use_rerank, |ev| {
+                send(&mut wref, ask_event_json(&ev));
+            })
+        };
+        match r {
+            Ok(()) => tracing::info!("ask 完成"),
+            Err(e) => {
+                tracing::info!("ask 失败: {e}");
+                send(&mut w, serde_json::json!({"type": "error", "text": e}).to_string());
+            }
+        }
+        // w 随线程结束 drop → 连接关闭（Connection: close）
+    });
+}
+
+/// 解析 URL query 参数（?a=b&c=d）
+fn query_param(url: &str, key: &str) -> Option<String> {
+    let qs = url.split('?').nth(1)?;
+    for pair in qs.split('&') {
+        let mut it = pair.splitn(2, '=');
+        if it.next() == Some(key) {
+            return it.next().map(|v| percent_decode(v));
+        }
+    }
+    None
+}
 /// URL → 相对路径（防穿越；百分号解码支持中文文件名）
 /// "/" → "index.html"；"/a/" → "a/index.html"；"/a/b" → "a/b" 或回退 "a/b.html"
 fn resolve_path(url: &str) -> Option<String> {
@@ -237,7 +440,7 @@ mod tests {
         // 占住端口，start 必须报错而不是换端口
         let hold = std::net::TcpListener::bind(("127.0.0.1", 18399)).unwrap();
         let root = Arc::new(RwLock::new(PathBuf::new()));
-        let r = start(root, 18399, false, vec![]);
+        let r = start(root, 18399, false, vec![], None);
         assert!(r.is_err());
         let msg = r.err().unwrap();
         assert!(msg.contains("被占用"), "报错应说明占用：{msg}");

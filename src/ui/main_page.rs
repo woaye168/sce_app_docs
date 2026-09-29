@@ -45,6 +45,21 @@ impl App {
         match phase {
             service::Phase::Serving => {
                 ui.label(format!("运行中：http://localhost:{}", self.server.port));
+                // 索引状态条（§6.1：状态可见、不阻塞）
+                if let Ok(s) = self.server.index_status.read() {
+                    match s.state.as_str() {
+                        "indexing" => {
+                            ui.label(format!("知识库索引中 {}/{} 文件…", s.done, s.total));
+                        }
+                        "ready" => {
+                            ui.label(format!("知识库就绪：{} 块（{}）", s.chunks, s.updated_at));
+                        }
+                        "failed" => {
+                            ui.colored_label(egui::Color32::YELLOW, format!("知识库索引失败：{}（不影响文档站）", s.error));
+                        }
+                        _ => {}
+                    }
+                }
                 if self.server.rebuilding {
                     ui.label("文档已变更，正在后台重建…");
                 } else if self.global_cfg.auto_rebuild {

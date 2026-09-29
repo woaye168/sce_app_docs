@@ -25,8 +25,10 @@ fn is_vitepress_v2(home: &Path) -> bool {
 pub fn ensure_deps(home: &Path, node: &Path) -> Result<(), String> {
     std::fs::create_dir_all(home).map_err(|e| format!("创建 vitepress_home 失败: {e}"))?;
     let pkg = home.join("package.json");
-    let _ = std::fs::write(&pkg, r#"{"name":"bgd-docs-vitepress","private":true,"type":"module","devDependencies":{"vitepress":"^2.0.0-alpha.20"}}"#);
-    let need_install = !home.join("node_modules/vitepress").is_dir() || !is_vitepress_v2(home);
+    let _ = std::fs::write(&pkg, r#"{"name":"bgd-docs-vitepress","private":true,"type":"module","devDependencies":{"vitepress":"^2.0.0-alpha.20","markdown-it":"^14"}}"#);
+    let need_install = !home.join("node_modules/vitepress").is_dir()
+        || !home.join("node_modules/markdown-it").is_dir()
+        || !is_vitepress_v2(home);
     if !need_install {
         return Ok(());
     }

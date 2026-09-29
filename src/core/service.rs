@@ -5,10 +5,10 @@
 //! 重建流：watcher 事件 → debounce 1s → 构建到备用 dist → 原子翻转服务根 → 删旧 dist（全程旧内容不掉线）
 
 use crate::core::config::{GlobalConfig, ProjectConfig};
-use crate::core::{builder, httpd, site, watcher};
+use crate::core::{builder, httpd, indexer, site, watcher};
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
 /// 默认端口（18753：本地文档站，避开 8080 等常用端口冲突）
@@ -59,6 +59,10 @@ pub struct ServiceState {
     /// watcher 监听路径（真实路径，不经 junction；start 时算好，Serving 后启用）
     watch_paths: Vec<(PathBuf, bool)>,
     _watcher: Option<watcher::DocWatcher>,
+    /// 索引状态（GUI 状态条 / /_api/index_status 读这里）
+    pub index_status: indexer::SharedIndexStatus,
+    /// API 共享状态（检索上下文在里面）
+    api: Option<Arc<httpd::ApiState>>,
 }
 
 impl Default for ServiceState {
@@ -79,6 +83,8 @@ impl Default for ServiceState {
             ctx: None,
             watch_paths: Vec::new(),
             _watcher: None,
+            index_status: indexer::new_shared_status(),
+            api: None,
         }
     }
 }
@@ -108,6 +114,7 @@ pub fn start(project_root: &std::path::Path, global: &GlobalConfig, project: &Pr
             return;
         }
     };
+    tracing::info!("site_gen ok: {} ← {}", site_dir.display(), project_root.display());
 
     // 先绑端口：被占立即失败（等效 strictPort），而不是构建几分钟后才发现
     let port = if global.port == 0 { DEFAULT_PORT } else { global.port };
@@ -117,7 +124,20 @@ pub fn start(project_root: &std::path::Path, global: &GlobalConfig, project: &Pr
     } else {
         Vec::new()
     };
-    let httpd = match httpd::start(dist_root.clone(), port, global.lan_access, hosts) {
+    // API 状态：索引状态 + 检索上下文（模型懒加载常驻）
+    let api = Arc::new(httpd::ApiState {
+        status: st.index_status.clone(),
+        search: Mutex::new(indexer::SearchCtx::new(home.clone(), site_dir.clone())),
+        use_rerank: global.rerank_enabled,
+        llm: crate::core::llm::LlmConfig {
+            base_url: global.llm_base_url.clone(),
+            api_key: global.llm_api_key.clone(),
+            model: global.llm_model.clone(),
+        },
+        max_rounds: global.max_tool_rounds.clamp(1, 20),
+        mcp_sessions: Mutex::new(crate::core::mcp::SessionMgr::new()),
+    });
+    let httpd = match httpd::start(dist_root.clone(), port, global.lan_access, hosts, Some(api.clone())) {
         Ok(h) => h,
         Err(e) => {
             st.last_error = e;
@@ -125,6 +145,8 @@ pub fn start(project_root: &std::path::Path, global: &GlobalConfig, project: &Pr
             return;
         }
     };
+    st.api = Some(api);
+    tracing::info!("httpd 已监听 端口{}（lan={}）", port, global.lan_access);
 
     // 后台构建链：装依赖（若缺）→ vitepress build 到 dist-a
     st.phase = if home.join("node_modules").is_dir() { Phase::Building } else { Phase::InstallingDeps };
@@ -169,6 +191,8 @@ pub fn stop(st: &mut ServiceState) {
     st.ctx = None;
     st.watch_paths.clear();
     st._watcher = None;
+    st.api = None;
+    st.index_status = indexer::new_shared_status();
 }
 
 /// UI/CLI 轮询：收首次构建结果、收监听事件、debounce 触发重建、收重建结果
@@ -181,6 +205,7 @@ pub fn tick(st: &mut ServiceState, auto_rebuild: bool) {
                 Ok(dist) => {
                     flip_root(st, dist);
                     st.phase = Phase::Serving;
+                    tracing::info!("build ok（Serving）");
                     // 起 watcher（auto_rebuild 开时）
                     if auto_rebuild && !st.watch_paths.is_empty() {
                         let (tx, rx) = mpsc::channel();
@@ -190,6 +215,8 @@ pub fn tick(st: &mut ServiceState, auto_rebuild: bool) {
                             st._watcher = Some(w);
                         }
                     }
+                    // 后台索引同步（不阻塞 Serving；模型懒加载，无变更时秒过）
+                    spawn_index_sync(st);
                 }
                 Err(e) => {
                     st.last_error = e;
@@ -228,11 +255,35 @@ pub fn tick(st: &mut ServiceState, auto_rebuild: bool) {
             st.rebuild_rx = None;
             st.rebuilding = false;
             match r {
-                Ok(dist) => flip_root(st, dist),
+                Ok(dist) => {
+                    flip_root(st, dist);
+                    spawn_index_sync(st); // 重建完成后索引增量同步
+                }
                 Err(e) => st.last_error = format!("重建失败：{e}"),
             }
         }
     }
+}
+
+/// 后台索引同步线程（共享 SearchCtx 锁，与 /_api/search 互斥排队；低并发无瓶颈）
+fn spawn_index_sync(st: &ServiceState) {
+    let Some(api) = &st.api else { return };
+    let api = api.clone();
+    std::thread::spawn(move || {
+        match indexer::sync_index(&api.search, &api.status) {
+            Ok(n) => tracing::info!("索引同步完成: {} 块", n),
+            Err(e) => {
+                tracing::info!("索引同步失败: {e}");
+                // 失败状态写进 index_status（sync_index 内部对 embed 失败已写，这里兜其他错误）
+                if let Ok(mut s) = api.status.write() {
+                    if s.state != "failed" {
+                        s.state = "failed".into();
+                        s.error = e;
+                    }
+                }
+            }
+        }
+    });
 }
 
 /// 重建：先重新生成站点 config（新增/删除 md 要刷新 sidebar 与根 md 副本）再构建。

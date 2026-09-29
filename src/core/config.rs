@@ -36,9 +36,25 @@ pub struct GlobalConfig {
     /// md 变更自动重建（默认 true；关掉则只手动重启服务刷新，浏览场景省 CPU）
     #[serde(default = "default_auto_rebuild")]
     pub auto_rebuild: bool,
+    /// 检索 rerank 重排（默认 true；关掉则只余弦排序）
+    #[serde(default = "default_auto_rebuild")]
+    pub rerank_enabled: bool,
+    /// LLM base_url（中转站，如 https://example.com/v1；空 = 未配置）
+    #[serde(default)]
+    pub llm_base_url: String,
+    /// LLM api_key
+    #[serde(default)]
+    pub llm_api_key: String,
+    /// LLM 模型（如 kimi-k3-0700）
+    #[serde(default)]
+    pub llm_model: String,
+    /// 最大工具调用轮数（默认 5，范围 1-20）
+    #[serde(default = "default_max_rounds")]
+    pub max_tool_rounds: usize,
 }
 
 fn default_auto_rebuild() -> bool { true }
+fn default_max_rounds() -> usize { 5 }
 
 /// 项目级配置（<项目>/.bgd/docs.json；只存与全局不同的项）
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]

@@ -20,13 +20,47 @@ use std::path::PathBuf;
 const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 const APP_NAME: &str = "本地文档站";
 
+/// 应用日志（写 <项目>/.bgd/log/docs-<日期>.log；CLI 场景同时回显控制台）
+fn log_line(msg: &str) {
+    let project = std::env::args().collect::<Vec<_>>().windows(2).find_map(|w| (w[0] == "--project-path").then(|| std::path::PathBuf::from(&w[1])));
+    bgd_appsdk::log::log("docs", project.as_deref(), None, "INFO", msg);
+}
+
+/// tracing → appsdk 日志文件（GUI 子系统下 println 被 Windows 吞掉，全靠这个文件诊断）
+struct LogWriter;
+impl std::io::Write for LogWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let s = String::from_utf8_lossy(buf);
+        for line in s.lines().filter(|l| !l.trim().is_empty()) {
+            log_line(line);
+        }
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+fn init_tracing() {
+    let _ = tracing_subscriber::fmt()
+        .with_writer(|| LogWriter)
+        .with_ansi(false)
+        .with_target(false)
+        .compact()
+        .try_init();
+}
+
 fn main() -> eframe::Result<()> {
     // CLI 子命令（自测/自动化用；命中即控制台模式执行，不进 GUI）
     let args: Vec<String> = std::env::args().collect();
     if args.len() >= 2 && args[1] == "serve" {
+        init_tracing();
+        log_line("=== serve 启动 ===");
         run_cli_serve(&args);
         std::process::exit(0);
     }
+    init_tracing();
+    log_line("=== GUI 启动 ===");
     bgd_appsdk::app::run(
         bgd_appsdk::app::AppOptions {
             app_name: APP_NAME,
@@ -56,6 +90,9 @@ struct App {
     /// 设置页编辑态（文本框绑定；保存才落盘）
     node_path_edit: String,
     port_edit: String,
+    /// AI 连通测试结果（后台线程回填）
+    ai_test_rx: Option<std::sync::mpsc::Receiver<String>>,
+    ai_test_result: String,
 }
 
 impl Default for App {
@@ -69,6 +106,8 @@ impl Default for App {
             port_edit: if global_cfg.port == 0 { String::new() } else { global_cfg.port.to_string() },
             global_cfg,
             project_cfg: core::config::ProjectConfig::default(),
+            ai_test_rx: None,
+            ai_test_result: String::new(),
         }
     }
 }
@@ -88,6 +127,9 @@ const TABS: &[bgd_appsdk::ui::ShellTab] = &[
     bgd_appsdk::ui::ShellTab { id: "main", label: "主页" },
     bgd_appsdk::ui::ShellTab { id: "global", label: "全局设置" },
     bgd_appsdk::ui::ShellTab { id: "project", label: "项目设置" },
+    bgd_appsdk::ui::ShellTab { id: "ai", label: "AI" },
+    bgd_appsdk::ui::ShellTab { id: "mcp", label: "MCP" },
+    bgd_appsdk::ui::ShellTab { id: "help", label: "帮助" },
 ];
 
 /// CLI serve 子命令：sce_app_docs serve --project-path <项目根> [--port <端口>] [--lan] [--allowed-hosts <域名>]
@@ -114,6 +156,16 @@ fn run_cli_serve(args: &[String]) {
         g.allowed_hosts_enabled = true;
     } else {
         g.allowed_hosts_enabled = false;
+    }
+    // LLM：继承 GUI 持久化配置，命令行参数可覆盖（自测/自动化传临时 key 不落盘）
+    if let Some(v) = get_arg("--llm-base") {
+        g.llm_base_url = v;
+    }
+    if let Some(v) = get_arg("--llm-key") {
+        g.llm_api_key = v;
+    }
+    if let Some(v) = get_arg("--llm-model") {
+        g.llm_model = v;
     }
     g.auto_rebuild = true; // CLI 场景始终自动重建（自测/开发用途）
     let p = config::read_project(&project);
@@ -153,6 +205,9 @@ impl bgd_appsdk::ui::ShellApp for App {
             "main" => self.ui_main(ui),
             "global" => self.ui_global(ui),
             "project" => self.ui_project(ui),
+            "ai" => self.ui_ai(ui),
+            "mcp" => self.ui_mcp(ui),
+            "help" => self.ui_help(ui),
             _ => {}
         }
     }
