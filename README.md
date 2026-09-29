@@ -1,15 +1,19 @@
 # sce_app_docs · 本地文档站
 
-BGD的SCE项目的本地文档聚合阅读工具：一个 egui 桌面应用，内嵌 VitePress dev server，把项目的框架 API 文档（api_generated）与自定义文档源聚合成一个带左导航、全文搜索的文档站，浏览器阅读体验。
+BGD的SCE项目的本地文档聚合阅读工具：一个 egui 桌面应用，把项目的框架 API 文档（api_generated）与自定义文档源构建成 VitePress 静态站点，内嵌 HTTP 服务托管，浏览器阅读体验。
 
 ## 功能特性
 
-- **零复制聚合**：文档源通过 Windows junction 原地引用，改源文件实时生效，不做任何文件拷贝
+- **静态构建 + 内嵌服务**：VitePress build 出静态站点，由应用内嵌 HTTP 服务托管——无外部常驻进程，关应用即停服，无端口残留
+- **自动重建**：md 文件保存后自动重新构建（约 7 秒），手动刷新即见新内容；可在设置页关闭
+- **零复制聚合**：文档源通过 Windows junction 原地引用，不做任何文件拷贝（项目根 md 除外，见下）
 - **多文档源**：框架 API 文档 + `.bgd/docs.json` 配置的任意多个自定义源目录
 - **左侧导航**：按目录结构多级递归生成 sidebar；目录含 index/README/AGENTS 时作为目录首页，否则纯分组
-- **全文搜索**：VitePress 本地搜索，无需外部服务
-- **智能首页**：项目根有 index/README/AGENTS 时直接作为站点首页；否则生成导航页（项目 md 列表 + 文档源列表 + `.bgd` 结构图）
+- **全文搜索**：VitePress 本地搜索（构建期生成索引），无需外部服务
+- **智能首页**：项目根 md 文件（index/README/AGENTS 等）复制到 `_root/` 路由；首页为导航页（项目 md 列表 + 文档源列表 + `.bgd` 结构图）
 - **明暗主题**：结构图与文档站整体跟随 VitePress 明暗主题自动切换
+- **局域网访问**：可选绑定 `0.0.0.0`，手机/其他设备直接打开
+- **域名白名单**：配合 Cloudflare Tunnel 等反向代理，界面配置域名 + 开关
 - **配置化**：站点模板（`vitepress_home/site_template.json`）可手改覆盖标题/搜索/链接风格等
 
 ## 安装与使用
@@ -30,16 +34,25 @@ BGD的SCE项目的本地文档聚合阅读工具：一个 egui 桌面应用，�
 ## 技术栈
 
 - **桌面壳**：Rust + eframe/egui，基于 [bgd_appsdk](https://github.com/woaye168/bgd_sce_appsdk) 统一入口（单实例/看守线程/日志/配置全托管）
-- **文档渲染**：VitePress 2.x（Vite + Vue 3），dev server 模式，全局安装于应用旁 `vitepress_home/`
+- **文档渲染**：VitePress 2.x（Vite + Vue 3），构建模式产出静态站点，全局安装于应用旁 `vitepress_home/`
+- **内嵌服务**：tiny_http（静态文件托管 + Host 白名单 + 缓存策略），端口随进程生命周期
+- **构建隔离**：vitepress build 短命子进程 + Windows Job Object（KILL_ON_JOB_CLOSE），app 异常退出也无孤儿
 - **目录链接**：Windows junction（无需管理员特权）
 
 ## CLI 子命令（自测/自动化）
 
 ```bash
-sce_app_docs serve --project-path <项目根> [--port <端口>] [--timeout <秒>]
+sce_app_docs serve --project-path <项目根> [--port <端口>] [--lan] [--allowed-hosts <域名>]
 ```
 
-同步阻塞启动 dev server，轮询端口直到就绪/超时/失败后自动清理退出。打印 `OK http://localhost:<port>`（exit 0）或 `FAILED <原因>` / `TIMEOUT`（exit 1）。供 AI 或脚本端到端验证服务可用，无需操作 GUI。
+前台常驻：构建完成后打印 `OK http://localhost:<port>` 并持续服务（md 变更自动重建），kill/Ctrl+C 即停（端口随进程释放）；失败 `FAILED <原因>`（exit 1）。供 AI 或脚本端到端验证，无需操作 GUI。
+
+## 测试
+
+```bash
+cargo test --lib                                 # 单元测试
+cargo test --test lifecycle -- --test-threads=1  # 生命周期 E2E（真实 exe + vitepress build）
+```
 
 ## 从源码构建
 

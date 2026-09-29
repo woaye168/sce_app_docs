@@ -33,7 +33,12 @@ pub struct GlobalConfig {
     /// 全局文档源（所有项目共享）
     #[serde(default)]
     pub sources: Vec<DocSource>,
+    /// md 变更自动重建（默认 true；关掉则只手动重启服务刷新，浏览场景省 CPU）
+    #[serde(default = "default_auto_rebuild")]
+    pub auto_rebuild: bool,
 }
+
+fn default_auto_rebuild() -> bool { true }
 
 /// 项目级配置（<项目>/.bgd/docs.json；只存与全局不同的项）
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]

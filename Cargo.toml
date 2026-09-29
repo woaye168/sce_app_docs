@@ -5,9 +5,17 @@ edition = "2021"
 description = "本地文档站"
 license = "AGPL-3.0"
 
+[lib]
+name = "sce_app_docs"
+path = "src/lib.rs"
+
 [[bin]]
 name = "sce_app_docs"
 path = "src/main.rs"
+
+[[test]]
+name = "lifecycle"
+path = "test/lifecycle.rs"
 
 [dependencies]
 eframe = "0.29"
@@ -17,6 +25,9 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 open = "5"
 rfd = "0.15"
+tiny_http = "0.12"
+notify = "8"
+windows-sys = { version = "0.59", features = ["Win32_System_JobObjects", "Win32_System_Threading", "Win32_Foundation"] }
 
 [profile.release]
 opt-level = 2

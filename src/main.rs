@@ -5,13 +5,16 @@
 //!
 //! 公共逻辑（CLI 分发 --quit/notify、单实例、看守线程、--background、项目解析、窗口壳）
 //! 由 bgd_appsdk::app::run 全托管——业务只需实现 ShellApp（标签页渲染）。
+//!
+//! 架构（v0.2 重构）：静态构建 + 内嵌 HTTP 服务。端口由 exe 自己持有，
+//! vitepress 只在构建时短命 spawn（Job Object 兜底）——无孤儿进程、无端口漂移。
 
 // Windows 下不弹出黑色控制台窗口
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
-mod core;
 mod ui;
 
+use sce_app_docs::core;
 use std::path::PathBuf;
 
 const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -44,12 +47,12 @@ struct App {
     project_root: Option<PathBuf>,
     /// 状态栏文本
     status: String,
-    /// dev server 状态（主页启停）
-    server: crate::core::server::ServerState,
+    /// 文档服务状态（主页启停）
+    server: core::service::ServiceState,
     /// 全局配置（进入设置页时读盘刷新）
-    global_cfg: crate::core::config::GlobalConfig,
+    global_cfg: core::config::GlobalConfig,
     /// 项目配置（随 on_project_changed 重读）
-    project_cfg: crate::core::config::ProjectConfig,
+    project_cfg: core::config::ProjectConfig,
     /// 设置页编辑态（文本框绑定；保存才落盘）
     node_path_edit: String,
     port_edit: String,
@@ -57,15 +60,15 @@ struct App {
 
 impl Default for App {
     fn default() -> Self {
-        let global_cfg = crate::core::config::read_global();
+        let global_cfg = core::config::read_global();
         Self {
             project_root: None,
             status: String::new(),
-            server: crate::core::server::ServerState::default(),
+            server: core::service::ServiceState::default(),
             node_path_edit: global_cfg.node_path.clone(),
             port_edit: if global_cfg.port == 0 { String::new() } else { global_cfg.port.to_string() },
             global_cfg,
-            project_cfg: crate::core::config::ProjectConfig::default(),
+            project_cfg: core::config::ProjectConfig::default(),
         }
     }
 }
@@ -76,7 +79,7 @@ impl App {
         self.project_cfg = self
             .project_root
             .as_deref()
-            .map(crate::core::config::read_project)
+            .map(core::config::read_project)
             .unwrap_or_default();
     }
 }
@@ -87,11 +90,12 @@ const TABS: &[bgd_appsdk::ui::ShellTab] = &[
     bgd_appsdk::ui::ShellTab { id: "project", label: "项目设置" },
 ];
 
-/// CLI serve 子命令：sce_app_docs serve --project-path <项目根> [--port <端口>] [--timeout <秒>] [--lan]
-/// 同步阻塞：启动 dev server → 轮询端口直到就绪/超时 → 打印结果并 kill 退出。
-/// 专供自测/自动化（AI 无需 GUI 即可端到端验证服务可用）。--lan 绑 0.0.0.0（局域网可访问）。
+/// CLI serve 子命令：sce_app_docs serve --project-path <项目根> [--port <端口>] [--lan] [--allowed-hosts <域名>]
+/// 前台常驻：构建完成开始服务后打印 OK 行，之后持续运行（md 变更自动重建），
+/// kill/Ctrl+C 即停（端口随进程释放）。失败打印 FAILED 退出 1。
+/// 专供自测/自动化：这就是真实代码路径，测它 = 测最终产物。
 fn run_cli_serve(args: &[String]) {
-    use crate::core::{config, server};
+    use core::{config, service};
     let get_arg = |flag: &str| -> Option<String> {
         args.iter().position(|a| a == flag).and_then(|i| args.get(i + 1)).cloned()
     };
@@ -99,52 +103,39 @@ fn run_cli_serve(args: &[String]) {
         eprintln!("缺少 --project-path <项目根>");
         std::process::exit(2);
     };
-    let timeout_secs: u64 = get_arg("--timeout").and_then(|s| s.parse().ok()).unwrap_or(30);
-    let mut st = server::ServerState::default();
     let mut g = config::read_global();
     if let Some(p) = get_arg("--port").and_then(|s| s.parse().ok()) {
         g.port = p;
     }
-    if args.iter().any(|a| a == "--lan") {
-        g.lan_access = true;
-    }
+    // CLI 确定性：lan/白名单只看命令行参数，不继承 GUI 持久化配置（防止脏配置污染自测）
+    g.lan_access = args.iter().any(|a| a == "--lan");
     if let Some(h) = get_arg("--allowed-hosts") {
         g.allowed_hosts = h;
         g.allowed_hosts_enabled = true;
+    } else {
+        g.allowed_hosts_enabled = false;
     }
+    g.auto_rebuild = true; // CLI 场景始终自动重建（自测/开发用途）
     let p = config::read_project(&project);
-    server::start(&project, &g, &p, &mut st);
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
-    // 等待 Running（期间可能短暂 Failed——vitepress 热重载 restart 瞬间端口断连，boot_tick 会误判；
-    // 真 Failed 是进程没起来/报错，日志 tail 有错误内容）
+    let mut st = service::ServiceState::default();
+    service::start(&project, &g, &p, &mut st);
+    let mut announced = false;
     loop {
-        server::boot_tick(&mut st);
+        service::tick(&mut st, true);
         match st.phase {
-            server::StartPhase::Running => {
-                println!("OK http://localhost:{}", st.port);
-                server::stop(&mut st);
-                return;
-            }
-            server::StartPhase::Failed => {
-                // 区分真假 Failed：日志含 error/EADDRINUSE/address 才是启动失败，
-                // 「restarting server」是热重载中间态，继续等
-                let err = st.last_error.to_lowercase();
-                if err.contains("error") || err.contains("eaddrinuse") || err.contains("address already") {
-                    eprintln!("FAILED {}", st.last_error);
-                    server::stop(&mut st);
-                    std::process::exit(1);
+            service::Phase::Serving => {
+                if !announced {
+                    println!("OK http://localhost:{}", st.port);
+                    announced = true;
                 }
-                // 热重载中间态：重置继续等
-                st.phase = server::StartPhase::Starting;
-                st.last_error.clear();
             }
-            _ if std::time::Instant::now() > deadline => {
-                eprintln!("TIMEOUT 等待服务就绪超时（{}s）", timeout_secs);
-                server::stop(&mut st);
+            service::Phase::Failed => {
+                eprintln!("FAILED {}", st.last_error);
                 std::process::exit(1);
             }
-            _ => std::thread::sleep(std::time::Duration::from_millis(200)),
+            _ => {}
         }
+        std::thread::sleep(std::time::Duration::from_millis(200));
     }
 }
 
@@ -167,8 +158,8 @@ impl bgd_appsdk::ui::ShellApp for App {
     }
 
     fn on_project_changed(&mut self, project: Option<&std::path::Path>) {
-        // 切项目即停旧服务（旧 dev server 服务的是旧项目站点，留着会误导）
-        crate::core::server::stop(&mut self.server);
+        // 切项目即停旧服务（旧站点服务的是旧项目内容，留着会误导）
+        core::service::stop(&mut self.server);
         self.project_root = project.map(|p| p.to_path_buf());
         self.reload_project_cfg();
         if let Some(p) = project {

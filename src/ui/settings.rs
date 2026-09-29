@@ -21,12 +21,16 @@ impl App {
             }
         });
         ui.horizontal(|ui| {
-            ui.label(format!("端口（留空={}）：", crate::core::server::DEFAULT_PORT));
+            ui.label(format!("端口（留空={}）：", crate::core::service::DEFAULT_PORT));
             ui.text_edit_singleline(&mut self.port_edit);
         });
         ui.checkbox(
             &mut self.global_cfg.lan_access,
             "局域网访问（绑 0.0.0.0，手机/其他设备可打开；关闭则只本机可访问）",
+        );
+        ui.checkbox(
+            &mut self.global_cfg.auto_rebuild,
+            "md 变更自动重建（关闭则改文档后需手动重启服务；浏览场景可关省 CPU）",
         );
         ui.checkbox(
             &mut self.global_cfg.allowed_hosts_enabled,
