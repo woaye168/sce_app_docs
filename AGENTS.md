@@ -107,6 +107,7 @@ sce_app_docs serve --project-path <项目根> [--port <端口>] [--lan] [--allow
 cargo test --lib                              # 单元测试（42 个，含真实模型加载约 15s；无 D:\local_models 时自动跳过模型测试）
 cargo test --test lifecycle -- --test-threads=1  # 生命周期 E2E（真实 exe + vitepress build + 索引，约 1 分钟）
 node --test test/stream_md.test.mjs           # 流式分段解析器（frontend/stream_md.mjs，零依赖）
+node --test test/chat_ops.test.mjs            # 对话操作纯逻辑：截断/重试/导出 md（frontend/chat_ops.mjs）
 # 真实 LLM 链路（可选）：设 BGD_TEST_LLM_BASE/KEY/MODEL 三个环境变量后跑 ask_live_llm_streaming
 ```
 

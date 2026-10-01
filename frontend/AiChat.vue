@@ -4,6 +4,7 @@ import { useRouter, useData } from 'vitepress'
 import { MermaidViewer } from 'vitepress-plugin-mermaid-viewer/client'
 import MarkdownIt from 'markdown-it'
 import { scanStream, vpFence } from './stream_md.mjs'
+import { truncateAt, retryFrom, toMarkdown } from './chat_ops.mjs'
 
 const router = useRouter()
 const { page: vpPage } = useData() // 当前页 relativePath（与 kb 文件路径一致，「解释当前文档」上下文）
@@ -124,6 +125,56 @@ async function highlightCodeIn(el) {
   const hljs = (await import('highlight.js/lib/common')).default
   blocks.forEach(b => { try { hljs.highlightElement(b) } catch { /* 未知语言保持原样 */ } })
 }
+// 停止生成：AbortController 掐断 fetch 流（已收到的部分保留，不算错误）
+let aborter = null
+function stopSend() { if (aborter) aborter.abort() }
+// 破坏性操作统一过确认对话框（防误触）：askConfirm 登记，确认才执行
+const confirmAct = ref(null) // { text, fn }
+function askConfirm(text, fn) { confirmAct.value = { text, fn } }
+function doConfirm() { const f = confirmAct.value?.fn; confirmAct.value = null; if (f) f() }
+// 头部「新开」：清空对话重新开始；「下载」：整段对话导出 md 文件
+function newChat() { askConfirm('清空当前全部对话，重新开始？', () => { stopSend(); messages.value = [] }) }
+function downloadChat() {
+  const blob = new Blob([toMarkdown(messages.value)], { type: 'text/markdown;charset=utf-8' })
+  const a = document.createElement('a')
+  a.href = URL.createObjectURL(blob)
+  a.download = `文档问答-${new Date().toISOString().slice(0, 16).replace(/[T:]/g, '-')}.md`
+  document.body.appendChild(a) // 不入 DOM 的 a.click() 部分浏览器不触发下载
+  a.click()
+  a.remove()
+  URL.revokeObjectURL(a.href)
+}
+// 气泡按钮组（图标见模板）：复制 / 删除（截断到该条前）/ 退回（删除+放回输入框）/ 重试（AI）
+// 复制：先给交互反馈（不等剪贴板——clipboard API 在无手势/权限场景会挂起而不是拒绝，曾致点了没反应）；
+// 写入 500ms 未兑现就走 execCommand 兜底
+function copyText(t, e) {
+  const btn = e?.currentTarget
+  if (btn) { btn.classList.add('copied'); setTimeout(() => btn.classList.remove('copied'), 2000) }
+  const fallback = () => {
+    const ta = document.createElement('textarea')
+    ta.value = t; ta.style.position = 'fixed'; ta.style.opacity = '0'
+    document.body.appendChild(ta); ta.select()
+    try { document.execCommand('copy') } catch {}
+    ta.remove()
+  }
+  try {
+    const p = navigator.clipboard && navigator.clipboard.writeText(t)
+    if (!p || !p.catch) return fallback()
+    Promise.race([p, new Promise((_, rej) => setTimeout(rej, 500))]).catch(fallback)
+  } catch { fallback() }
+}
+function delFrom(i) { askConfirm('删除该条及后续全部消息？', () => { messages.value = truncateAt(messages.value, i) }) }
+function backToInput(i) { askConfirm('删除该条及后续消息，并把它放回输入框？', () => { input.value = messages.value[i].text; messages.value = truncateAt(messages.value, i) }) }
+function retryAt(i) {
+  if (sending.value) return
+  askConfirm('用触发此回复的问题重新生成（该条及后续消息会被移除）？', () => {
+    const r = retryFrom(messages.value, i)
+    if (!r) return
+    messages.value = r.messages
+    input.value = r.question
+    send()
+  })
+}
 async function send() {
   const q = input.value.trim()
   if (!q || sending.value) return
@@ -143,9 +194,11 @@ async function send() {
   const t0 = Date.now()
   const timer = setInterval(() => { ai.elapsed = ((Date.now() - t0) / 1000).toFixed(0) }, 500)
   try {
+    aborter = new AbortController()
     const resp = await fetch('/_api/ask', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
+      signal: aborter.signal,
       body: JSON.stringify({ question: q, history, page: vpPage.value?.relativePath || '', model: chatModel.value || '' })
     })
     if (!resp.ok) {
@@ -180,8 +233,9 @@ async function send() {
       }
     }
   } catch (e) {
-    ai.errHtml += '<p class="err">' + esc(String(e)) + '</p>'
+    if (!e || e.name !== 'AbortError') ai.errHtml += '<p class="err">' + esc(String(e)) + '</p>' // 主动停止不算错误
   }
+  aborter = null
   clearInterval(timer)
   ai.stage = ''
   sending.value = false
@@ -213,6 +267,12 @@ async function send() {
         </div>
         <span v-else-if="modelName" class="ai-model">{{ modelName }}</span>
         <span class="ai-winctl">
+          <button class="ai-wbtn" title="新开对话（清空当前）" @click="newChat">
+            <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
+          </button>
+          <button class="ai-wbtn" title="下载对话（markdown）" :disabled="!messages.length" @click="downloadChat">
+            <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3"/></svg>
+          </button>
           <button class="ai-wbtn" :class="{ on: size === 'tall' }" :title="size === 'tall' ? '还原浮窗' : '放大（高度拉满）'" @click="size = size === 'tall' ? '' : 'tall'">
             <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v18M7 7l5-4 5 4M7 17l5 4 5-4"/></svg>
           </button>
@@ -254,6 +314,23 @@ async function send() {
             </template>
           </div>
           <div v-if="m.errHtml" class="ai-bubble" v-html="m.errHtml"></div>
+          <!-- 气泡按钮组（纯图标，紧跟气泡下方）：用户=复制/删除/退回；AI=复制/重试 -->
+          <div v-if="m.text" class="ai-acts">
+            <button title="复制" data-copied="已复制" @click="copyText(m.text, $event)">
+              <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+            </button>
+            <template v-if="m.role === 'user'">
+              <button title="删除（含后续全部消息）" @click="delFrom(i)">
+                <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2m3 0v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/></svg>
+              </button>
+              <button title="退回（删除并放回输入框）" @click="backToInput(i)">
+                <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7v6h6"/><path d="M21 17a9 9 0 0 0-15-6.7L3 13"/></svg>
+              </button>
+            </template>
+            <button v-else title="重试（用触发此回复的问题重新生成）" :disabled="sending" @click="retryAt(i)">
+              <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M23 4v6h-6M1 20v-6h6"/><path d="M3.5 9a9 9 0 0 1 14.9-3.4L23 10M1 14l4.6 4.4A9 9 0 0 0 20.5 15"/></svg>
+            </button>
+          </div>
           <div v-if="m.sources && m.sources.length" class="ai-sources" @click="goSource">
             <div class="ai-sources-title">参考：</div>
             <a v-for="(s, k) in m.sources" :key="k" :href="s.url" :title="s.file + (s.heading ? ' › ' + s.heading : '')">{{ shortFile(s.file) }}<template v-if="s.heading"> › {{ shortHeading(s.heading) }}</template></a>
@@ -263,8 +340,21 @@ async function send() {
       </div>
       <div class="ai-input">
         <textarea v-model="input" rows="2" placeholder="输入问题，Enter 发送，Shift+Enter 换行" @keydown.enter.exact.prevent="send"></textarea>
-        <button class="ai-send" :disabled="sending || !configured" @click="send">发送</button>
+        <button v-if="sending" class="ai-send ai-stop" title="提前结束当前回复" @click="stopSend">停止</button>
+        <button v-else class="ai-send" :disabled="!configured" @click="send">发送</button>
       </div>
+      <!-- 破坏性操作确认对话框（液态玻璃，面板内居中） -->
+      <Transition name="pop">
+        <div v-if="confirmAct" class="ai-confirm-mask" @click.self="confirmAct = null">
+          <div class="ai-confirm">
+            <div class="ai-confirm-text">{{ confirmAct.text }}</div>
+            <div class="ai-confirm-btns">
+              <button class="ai-confirm-cancel" @click="confirmAct = null">取消</button>
+              <button class="ai-confirm-ok" @click="doConfirm">确认</button>
+            </div>
+          </div>
+        </div>
+      </Transition>
     </div>
   </Transition>
 </template>
@@ -303,7 +393,7 @@ html.dark .ai-panel { box-shadow: inset 0 1px 0 rgba(255, 255, 255, .08), 0 24px
   }
 }
 /* 窗口控制按钮（Trae 式描线小图标，hover 亮） */
-.ai-winctl { display: flex; gap: 2px; margin-left: 6px; }
+.ai-winctl { display: flex; gap: 2px; margin-left: auto; }
 .ai-wbtn {
   display: flex; align-items: center; justify-content: center; width: 24px; height: 24px;
   border: none; border-radius: 7px; cursor: pointer; color: var(--vp-c-text-3); background: transparent;
@@ -361,7 +451,7 @@ html.dark .ai-dock-pop { box-shadow: 0 12px 40px rgba(0, 0, 0, .55); }
 }
 .ai-model { margin-left: auto; font-size: 12px; font-weight: 400; color: var(--vp-c-text-3); }
 /* 自制模型下拉（液态玻璃：胶囊触发器 + 毛玻璃弹层，全主题变量明暗自适应） */
-.ai-msel { position: relative; margin-left: auto; }
+.ai-msel { position: relative; }
 .ai-msel-btn {
   display: flex; align-items: center; gap: 5px; cursor: pointer; max-width: 200px;
   font-size: 12px; color: var(--vp-c-text-2);
@@ -393,9 +483,29 @@ html.dark .ai-msel-pop { box-shadow: 0 12px 40px rgba(0, 0, 0, .55); }
 .ai-msel-item.active { color: var(--vp-c-brand); font-weight: 600; }
 .ai-msel-check { flex: none; }
 .ai-warn { padding: 10px 18px; font-size: 13px; color: var(--vp-c-warning-text, #b88230); background: color-mix(in srgb, #b88230 12%, transparent); }
-.ai-list { flex: 1; overflow-y: auto; padding: 14px; display: flex; flex-direction: column; gap: 10px; }
+.ai-list { flex: 1; overflow-y: auto; padding: 14px; display: flex; flex-direction: column; gap: 18px; }
 /* 分段渲染后一条消息多个气泡/图/代码段，段间留呼吸间隙（原先单气泡没这问题） */
 .ai-msg > * + * { margin-top: 6px; }
+/* 气泡按钮组（纯图标、低存在感）：与气泡边缘精确对齐（用户右对齐/AI 左对齐），上方多留间隙 */
+.ai-acts { display: flex; gap: 2px; margin-top: 8px !important; }
+.ai-msg.user .ai-acts { justify-content: flex-end; }
+.ai-acts button {
+  position: relative;
+  display: flex; align-items: center; justify-content: center; width: 22px; height: 22px;
+  border: none; border-radius: 6px; cursor: pointer; background: transparent;
+  color: var(--vp-c-text-3); transition: color .15s, background .15s;
+}
+.ai-acts button:hover { color: var(--vp-c-text-1); background: color-mix(in srgb, var(--vp-c-text-3) 15%, transparent); }
+.ai-acts button:disabled { opacity: .4; cursor: default; }
+/* 复制完成反馈：图标变主题色 + 「已复制」浮签（对齐代码块复制的交互感） */
+.ai-acts button.copied { color: var(--vp-c-brand); }
+.ai-acts button.copied::after {
+  content: attr(data-copied); position: absolute; bottom: calc(100% + 4px); left: 50%; transform: translateX(-50%);
+  font-size: 11px; white-space: nowrap; padding: 2px 8px; border-radius: 6px;
+  background: color-mix(in srgb, var(--vp-c-bg) 85%, transparent); color: var(--vp-c-text-1);
+  border: 1px solid color-mix(in srgb, var(--vp-c-divider) 60%, transparent);
+  backdrop-filter: blur(8px); pointer-events: none;
+}
 .ai-empty { margin: auto; color: var(--vp-c-text-3); font-size: 13px; }
 .ai-msg.user .ai-bubble {
   background: linear-gradient(135deg, #5b8cff, #a06bff); color: #fff; margin-left: 48px;
@@ -461,4 +571,24 @@ html.dark .ai-bubble :deep(.hljs-type), html.dark .ai-bubble :deep(.hljs-built_i
   color: #fff; background: linear-gradient(135deg, #5b8cff, #a06bff); font-size: 14px;
 }
 .ai-send:disabled { opacity: .5; cursor: default; }
+/* 停止按钮：与发送同款的文字按钮，红色渐变 */
+.ai-stop { background: linear-gradient(135deg, #ff7a5c, #e8405f); }
+/* 破坏性操作确认对话框：面板内居中的液态玻璃卡片 */
+.ai-confirm-mask {
+  position: absolute; inset: 0; z-index: 40; display: flex; align-items: center; justify-content: center;
+  background: color-mix(in srgb, var(--vp-c-bg) 40%, transparent);
+  backdrop-filter: blur(6px); border-radius: 18px;
+}
+.ai-confirm {
+  min-width: 240px; max-width: 300px; padding: 18px; border-radius: 14px;
+  background: color-mix(in srgb, var(--vp-c-bg) 85%, transparent);
+  backdrop-filter: blur(24px) saturate(180%);
+  border: 1px solid color-mix(in srgb, var(--vp-c-divider) 60%, transparent);
+  box-shadow: 0 16px 48px rgba(0, 0, 0, .25);
+}
+.ai-confirm-text { font-size: 13.5px; color: var(--vp-c-text-1); line-height: 1.6; }
+.ai-confirm-btns { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px; }
+.ai-confirm-btns button { border: none; border-radius: 8px; padding: 5px 16px; font-size: 13px; cursor: pointer; }
+.ai-confirm-cancel { background: color-mix(in srgb, var(--vp-c-text-3) 14%, transparent); color: var(--vp-c-text-2); }
+.ai-confirm-ok { background: linear-gradient(135deg, #5b8cff, #a06bff); color: #fff; }
 </style>

@@ -293,6 +293,8 @@ pub fn write_site_config(
     std::fs::write(theme_dir.join("AiChat.vue"), crate::core::site_templates::AI_CHAT_VUE)?;
     // 流式分段扫描器（真实前端文件嵌入，AiChat.vue import 它）
     std::fs::write(theme_dir.join("stream_md.mjs"), crate::core::site_templates::STREAM_MD_MJS)?;
+    // 对话操作纯逻辑（截断/重试/导出 md，AiChat.vue import 它）
+    std::fs::write(theme_dir.join("chat_ops.mjs"), crate::core::site_templates::CHAT_OPS_MJS)?;
     Ok(dir)
 }
 

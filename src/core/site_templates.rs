@@ -16,3 +16,6 @@ pub(crate) const CUSTOM_CSS: &str = include_str!("../../frontend/custom.css");
 
 /// 流式 markdown 分段扫描器（纯函数，node --test test/stream_md.test.mjs 直测）
 pub(crate) const STREAM_MD_MJS: &str = include_str!("../../frontend/stream_md.mjs");
+
+/// 对话操作纯逻辑（截断/重试/导出 md；node --test test/chat_ops.test.mjs 直测）
+pub(crate) const CHAT_OPS_MJS: &str = include_str!("../../frontend/chat_ops.mjs");
