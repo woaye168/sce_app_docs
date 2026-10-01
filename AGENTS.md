@@ -69,6 +69,8 @@ doc/research/          # 设计文档（架构重构方案等）
 
 **出处锚点**：检索命中的 url 拼 `#标题锚点`（kb.rs `heading_anchor`，**严格对齐 @mdit-vue/shared slugify**：NFKD→特殊字符→`-`→折叠→去首尾→数字开头加`_`→小写，`·`保留——和 GitHub slugger 不同，实测比对过）；AiChat 出处点击自接管（goSource）：站点 cleanUrls=false 路由是 .html 风格，clean 路径不匹配会整页刷新丢 SPA 上下文导致锚点滚动失败。
 
+**对话面板交互（v0.3.1 追加）**：流式分段渲染（parseSegments 按已闭合 fence 切 md/code/mermaid 段，fence 闭合即渲染/高亮）；侧边用户消息锚点导航（左缘竖点 rail，PC hover 展开、移动端点展开/点外或点锚点关闭——**弹层必须是 rail 旁的 flex 兄弟节点**（in-flow），absolute top:0 会让弹层与垂直居中的 rail 错位，hover 路径一离开就 mouseleave 关弹层）；窗口三档尺寸（''/tall/full + 移动端媒体查询占满屏，goSource 自动退出 full）。**大坑：手写 `-webkit-backdrop-filter` 会被 lightningcss 去重吞掉无前缀 `backdrop-filter`**——Chrome 142+ 已不支持 -webkit 别名，产物里只剩 webkit 前缀 = 毛玻璃从不生效（「穿透看不清」根治其实是透明度）。**只写无前缀属性**，交给构建处理。
+
 ## 使用方约定（改代码前必读）
 
 - 应用只需实现 `ShellApp` 并调 `bgd_appsdk::app::run`——公共逻辑（CLI 分发、单实例、看守线程、项目解析、窗口壳）全托管，禁止自己再写一套。

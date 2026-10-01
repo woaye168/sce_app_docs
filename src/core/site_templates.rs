@@ -19,6 +19,9 @@ async function goSource(e) {
   const u = new URL(a.href, location.origin)
   if (u.origin !== location.origin) return // 外链不拦
   e.preventDefault()
+  // 点参考跳转后收起大窗：全屏退回浮窗；手机竖屏（面板即全屏）直接关面板，让文档露出来
+  if (size.value === 'full') size.value = ''
+  if (window.innerWidth <= 640) open.value = false
   const target = decodeURIComponent(u.hash.slice(1))
   // 站点 cleanUrls=false，VP 路由是 .html 风格；出处 url 是 clean 风格，导航前补扩展名
   //（clean 路径不匹配路由会导致整页刷新，SPA 轮询上下文丢失 → 锚点滚动失败）
@@ -53,6 +56,23 @@ const messages = ref([])
 const input = ref('')
 const sending = ref(false)
 const listEl = ref(null)
+// 窗口尺寸三档：'' 浮窗 | 'tall' 放大（高度拉满）| 'full' 全屏（宽高拉满）——解决「高度太短一直拖」
+const size = ref('')
+// 侧边对话锚点导航（Trae 式：左缘竖点）。
+// 交互双模：PC hover 展开（弹层贴 rail 无间隙，鼠标可移入选择）；移动端点击 rail 切换，点外部/点锚点关闭
+const dockOpen = ref(false)
+function toggleDock(e) { e.stopPropagation(); dockOpen.value = !dockOpen.value }
+watch(dockOpen, v => {
+  if (!v) return
+  const close = (ev) => { if (!ev.target.closest('.ai-dock')) { dockOpen.value = false; document.removeEventListener('click', close) } }
+  setTimeout(() => document.addEventListener('click', close), 0)
+})
+const userMsgs = computed(() => messages.value.map((m, i) => ({ text: m.text, idx: i, role: m.role })).filter(m => m.role === 'user'))
+async function jumpTo(idx) {
+  dockOpen.value = false
+  await nextTick()
+  listEl.value?.querySelector(`[data-mi="${idx}"]`)?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+}
 const lastMsg = computed(() => messages.value[messages.value.length - 1])
 const lastStage = computed(() => (lastMsg.value && lastMsg.value.stage) || '思考中…')
 const lastElapsed = computed(() => (lastMsg.value && lastMsg.value.elapsed) || 0)
@@ -71,22 +91,33 @@ async function toggle() {
 }
 async function scrollDown() { await nextTick(); listEl.value && listEl.value.scrollTo({ top: 99999999 }) }
 function esc(s) { return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;') }
-// 流式分段：正文按「已闭合的 mermaid 块」切段——md 段走 v-html，mermaid 段走 MermaidViewer 组件。
-// 关键收益：fence 一闭合图立刻渲染（不用等整轮 done）；组件按 key 保身份，后续 delta 不重挂载。
-// 未闭合的尾部 fence 自然落在 md 段里按代码块显示（与原来一致）。
+// 流式分段：正文按「已闭合 fence」切三类段——流动 md 段 v-html；mermaid 段 MermaidViewer；
+// 已闭合代码 fence 切出成 CodeSeg 静态段（mounted 时高亮一次，不再被后续 delta 的 v-html 重渲冲掉）。
+// 收益统一：fence 一闭合，图即渲染、代码即高亮，不等整轮 done。未闭合尾部 fence 留在 md 段按代码显示。
 function parseSegments(text) {
   const segs = []
-  const re = /```mermaid\s*\n([\s\S]*?)```/g
+  const re = /```(\w*)\s*\n([\s\S]*?)```/g
   let last = 0, m, i = 0
   while ((m = re.exec(text))) {
     if (m.index > last) segs.push({ type: 'md', html: md.render(text.slice(last, m.index)) })
-    segs.push({ type: 'mermaid', graph: encodeURIComponent(m[1].trim()), key: 'mm' + i })
+    const lang = (m[1] || '').toLowerCase()
+    if (lang === 'mermaid' || lang === 'mmd') {
+      segs.push({ type: 'mermaid', graph: encodeURIComponent(m[2].trim()), key: 'mm' + i })
+    } else {
+      segs.push({ type: 'code', html: md.render(m[0]), key: 'cc' + i })
+    }
     last = m.index + m[0].length; i++
   }
   if (last < text.length) segs.push({ type: 'md', html: md.render(text.slice(last)) })
   return segs
 }
-// 代码块语法高亮（highlight.js common 集懒加载，只在有代码块时下发；mermaid 块已被换掉，跳过）
+// 代码段组件：静态 html（v-html 不随流式重渲），挂载后高亮一次
+const CodeSeg = {
+  props: { html: String },
+  template: '<div class="ai-bubble ai-code-seg" v-html="html"></div>',
+  mounted() { highlightCodeIn(this.$el) }
+}
+// 代码块语法高亮（highlight.js common 集懒加载，只在有代码块时下发；mermaid 段不走这）
 async function highlightCodeIn(el) {
   const blocks = el?.querySelectorAll('pre code:not(.language-mermaid):not(.hljs)') || []
   if (!blocks.length) return
@@ -165,9 +196,8 @@ async function send() {
     <svg v-else viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg>
   </button>
   <Transition name="pop">
-    <div v-if="open" class="ai-panel">
+    <div v-if="open" class="ai-panel" :class="size">
       <div class="ai-header">
-        <span>文档问答</span>
         <div v-if="models.length" class="ai-msel" title="本次问答使用的模型（默认值在 AI 设置页）">
           <button class="ai-msel-btn" @click.stop="mselOpen = !mselOpen">
             <span>{{ chatModel || modelName }}</span>
@@ -182,11 +212,32 @@ async function send() {
           </Transition>
         </div>
         <span v-else-if="modelName" class="ai-model">{{ modelName }}</span>
+        <span class="ai-winctl">
+          <button class="ai-wbtn" :class="{ on: size === 'tall' }" :title="size === 'tall' ? '还原浮窗' : '放大（高度拉满）'" @click="size = size === 'tall' ? '' : 'tall'">
+            <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v18M7 7l5-4 5 4M7 17l5 4 5-4"/></svg>
+          </button>
+          <button class="ai-wbtn" :class="{ on: size === 'full' }" :title="size === 'full' ? '还原浮窗' : '全屏'" @click="size = size === 'full' ? '' : 'full'">
+            <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3m0 18h3a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2h3"/></svg>
+          </button>
+          <button class="ai-wbtn" title="关闭" @click="open = false">
+            <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg>
+          </button>
+        </span>
       </div>
       <div v-if="!configured" class="ai-warn">LLM 未配置：请到应用「AI」设置页填 base_url / api_key / model</div>
+      <div v-if="userMsgs.length > 1" class="ai-dock" @mouseenter="dockOpen = true" @mouseleave="dockOpen = false">
+        <div class="ai-dock-rail" @click="toggleDock"><i v-for="m in userMsgs" :key="m.idx"></i></div>
+        <Transition name="pop">
+          <div v-if="dockOpen" class="ai-dock-pop">
+            <div v-for="m in userMsgs" :key="m.idx" class="ai-dock-item" @click="jumpTo(m.idx)">
+              <span class="ai-dock-n">{{ userMsgs.indexOf(m) + 1 }}</span>{{ m.text.slice(0, 26) }}
+            </div>
+          </div>
+        </Transition>
+      </div>
       <div ref="listEl" class="ai-list">
         <div v-if="messages.length === 0" class="ai-empty">问我任何关于本项目文档的问题</div>
-        <div v-for="(m, i) in messages" :key="i" class="ai-msg" :class="m.role">
+        <div v-for="(m, i) in messages" :key="i" class="ai-msg" :class="m.role" :data-mi="i">
           <details v-if="m.think" :open="m.thinkOpen" class="ai-think">
             <summary>思考过程</summary>
             <div v-html="m.thinkHtml"></div>
@@ -197,6 +248,7 @@ async function send() {
           </div>
           <template v-for="(seg, si) in parseSegments(m.text)" :key="si">
             <MermaidViewer v-if="seg.type === 'mermaid'" class="ai-mmd" :graph="seg.graph" :id="seg.key + '-' + i" />
+            <CodeSeg v-else-if="seg.type === 'code'" :html="seg.html" />
             <div v-else class="ai-bubble" v-html="seg.html"></div>
           </template>
           <div v-if="m.errHtml" class="ai-bubble" v-html="m.errHtml"></div>
@@ -233,12 +285,70 @@ async function send() {
   /* 毛玻璃：底色不透明度拉高防底下文字穿透叠加（72% 实测看不清），blur 加大 */
   background: color-mix(in srgb, var(--vp-c-bg) 90%, transparent);
   backdrop-filter: blur(28px) saturate(180%);
-  -webkit-backdrop-filter: blur(28px) saturate(180%);
   border: 1px solid color-mix(in srgb, var(--vp-c-divider) 60%, transparent);
   box-shadow: 0 24px 64px rgba(0, 0, 0, .18);
 }
 /* 暗色下 .18 的黑影比背景还亮会变「灰晕」——暗色阴影要更深更不透明 */
 html.dark .ai-panel { box-shadow: 0 24px 64px rgba(0, 0, 0, .55); }
+/* 尺寸档：tall 放大（高度拉满，宽度不变）；full 全屏（宽高拉满，留 16px 呼吸边） */
+.ai-panel.tall { top: 16px; bottom: 84px; height: auto; max-height: none; }
+.ai-panel.full { inset: 16px; width: auto; height: auto; max-width: none; max-height: none; }
+/* 手机竖屏：面板即全屏（媒体查询压住所有尺寸档） */
+@media (max-width: 640px) {
+  .ai-panel, .ai-panel.tall, .ai-panel.full {
+    inset: 0; width: 100%; height: 100%; max-width: none; max-height: none; border-radius: 0;
+  }
+}
+/* 窗口控制按钮（Trae 式描线小图标，hover 亮） */
+.ai-winctl { display: flex; gap: 2px; margin-left: 6px; }
+.ai-wbtn {
+  display: flex; align-items: center; justify-content: center; width: 24px; height: 24px;
+  border: none; border-radius: 7px; cursor: pointer; color: var(--vp-c-text-3); background: transparent;
+  transition: color .15s, background .15s;
+}
+.ai-wbtn:hover { color: var(--vp-c-text-1); background: color-mix(in srgb, var(--vp-c-brand) 14%, transparent); }
+.ai-wbtn.on { color: var(--vp-c-brand); }
+/* 侧边锚点导航：左缘竖点轨道（常态极简），hover 展开液态玻璃列表 */
+.ai-dock { position: absolute; left: 0; top: 60px; bottom: 70px; z-index: 20; display: flex; align-items: center; }
+.ai-dock-rail {
+  display: flex; flex-direction: column; gap: 6px; padding: 8px 5px 8px 6px; cursor: pointer;
+  background: color-mix(in srgb, var(--vp-c-bg) 40%, transparent);
+  border-radius: 0 10px 10px 0;
+  backdrop-filter: blur(10px);
+  transition: background .15s;
+}
+.ai-dock-rail i {
+  width: 4px; height: 14px; border-radius: 2px;
+  background: color-mix(in srgb, var(--vp-c-text-3) 55%, transparent);
+  transition: background .15s;
+}
+/* hover 是「整块玻璃微亮」而不是亮蓝跳色（苹果式克制） */
+.ai-dock:hover .ai-dock-rail { background: color-mix(in srgb, var(--vp-c-bg) 70%, transparent); }
+.ai-dock:hover .ai-dock-rail i { background: color-mix(in srgb, var(--vp-c-text-2) 85%, transparent); }
+.ai-dock-pop {
+  min-width: 200px; max-width: 280px; max-height: 320px; overflow-y: auto; padding: 5px; margin-left: 2px;
+  border-radius: 14px;
+  background: color-mix(in srgb, var(--vp-c-bg) 82%, transparent);
+  backdrop-filter: blur(24px) saturate(180%);
+  border: 1px solid color-mix(in srgb, var(--vp-c-divider) 55%, transparent);
+  box-shadow: 0 12px 40px rgba(0, 0, 0, .18);
+}
+html.dark .ai-dock-pop { box-shadow: 0 12px 40px rgba(0, 0, 0, .55); }
+.ai-dock-item {
+  display: flex; align-items: center; gap: 8px; padding: 6px 10px; border-radius: 9px;
+  font-size: 12.5px; color: var(--vp-c-text-2); cursor: pointer;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.ai-dock-item:hover { background: color-mix(in srgb, var(--vp-c-brand) 14%, transparent); color: var(--vp-c-text-1); }
+/* 序号徽章：液态玻璃小圆片（半透明底+细边+模糊），不要实心渐变球 */
+.ai-dock-n {
+  flex: none; min-width: 18px; height: 18px; padding: 0 4px; border-radius: 999px; font-size: 10px;
+  display: flex; align-items: center; justify-content: center;
+  color: var(--vp-c-text-2);
+  background: color-mix(in srgb, var(--vp-c-bg-soft) 55%, transparent);
+  border: 1px solid color-mix(in srgb, var(--vp-c-divider) 60%, transparent);
+  backdrop-filter: blur(8px);
+}
 .pop-enter-active, .pop-leave-active { transition: opacity .18s, transform .18s; }
 .pop-enter-from, .pop-leave-to { opacity: 0; transform: translateY(12px) scale(.98); }
 .ai-header {
@@ -254,7 +364,6 @@ html.dark .ai-panel { box-shadow: 0 24px 64px rgba(0, 0, 0, .55); }
   font-size: 12px; color: var(--vp-c-text-2);
   background: color-mix(in srgb, var(--vp-c-bg-soft) 55%, transparent);
   backdrop-filter: blur(12px) saturate(160%);
-  -webkit-backdrop-filter: blur(12px) saturate(160%);
   border: 1px solid color-mix(in srgb, var(--vp-c-divider) 55%, transparent);
   border-radius: 999px; padding: 3px 10px;
   transition: border-color .15s, color .15s;
@@ -269,7 +378,6 @@ html.dark .ai-panel { box-shadow: 0 24px 64px rgba(0, 0, 0, .55); }
   border-radius: 14px;
   background: color-mix(in srgb, var(--vp-c-bg) 82%, transparent);
   backdrop-filter: blur(24px) saturate(180%);
-  -webkit-backdrop-filter: blur(24px) saturate(180%);
   border: 1px solid color-mix(in srgb, var(--vp-c-divider) 55%, transparent);
   box-shadow: 0 12px 40px rgba(0, 0, 0, .18);
 }
@@ -283,6 +391,8 @@ html.dark .ai-msel-pop { box-shadow: 0 12px 40px rgba(0, 0, 0, .55); }
 .ai-msel-check { flex: none; }
 .ai-warn { padding: 10px 18px; font-size: 13px; color: var(--vp-c-warning-text, #b88230); background: color-mix(in srgb, #b88230 12%, transparent); }
 .ai-list { flex: 1; overflow-y: auto; padding: 14px; display: flex; flex-direction: column; gap: 10px; }
+/* 分段渲染后一条消息多个气泡/图/代码段，段间留呼吸间隙（原先单气泡没这问题） */
+.ai-msg > * + * { margin-top: 6px; }
 .ai-empty { margin: auto; color: var(--vp-c-text-3); font-size: 13px; }
 .ai-msg.user .ai-bubble {
   background: linear-gradient(135deg, #5b8cff, #a06bff); color: #fff; margin-left: 48px;
