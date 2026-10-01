@@ -287,12 +287,9 @@ pub fn write_site_config(
     // Layout 槽位挂 AI 问答组件（layout-bottom 浮动面板）
     let theme_dir = cfg.join("theme");
     std::fs::create_dir_all(&theme_dir)?;
-    // enhanceMermaid 注册 MermaidViewer 组件（viewer 插件官方注册方式，无版本敏感 hack）；
-    // 组件内部动态 import mermaid 库，不拖累首开
-    std::fs::write(theme_dir.join("index.js"),
-        "import DefaultTheme from 'vitepress/theme'\nimport { h } from 'vue'\nimport AiChat from './AiChat.vue'\nimport { enhanceMermaid } from 'vitepress-plugin-mermaid-viewer/client'\nimport 'vitepress-plugin-mermaid-viewer/client.css'\nimport './custom.css'\nexport default {\n  extends: DefaultTheme,\n  Layout: () => h(DefaultTheme.Layout, null, { 'layout-bottom': () => h(AiChat) }),\n  enhanceApp({ app }) { enhanceMermaid(app) }\n}\n")?;
-    std::fs::write(theme_dir.join("custom.css"),
-        "/* 结构图：无背景色，目录/连接线颜色跟随明暗主题 */\n.ftree {\n  font-family: var(--vp-font-family-mono);\n  font-size: 13px;\n  line-height: 1.6;\n  padding: 0;\n  margin: 0;\n  overflow-x: auto;\n  background: transparent;\n}\n.ft-dir { color: var(--vp-c-text-1); font-weight: bold; }\n.ft-line { color: var(--vp-c-text-3); }\n")?;
+    // 主题三件套 + AiChat 组件：真实前端文件经 site_templates include_str! 嵌入（见该文件头部约定）
+    std::fs::write(theme_dir.join("index.js"), crate::core::site_templates::THEME_INDEX_JS)?;
+    std::fs::write(theme_dir.join("custom.css"), crate::core::site_templates::CUSTOM_CSS)?;
     std::fs::write(theme_dir.join("AiChat.vue"), crate::core::site_templates::AI_CHAT_VUE)?;
     // 流式分段扫描器（真实前端文件嵌入，AiChat.vue import 它）
     std::fs::write(theme_dir.join("stream_md.mjs"), crate::core::site_templates::STREAM_MD_MJS)?;

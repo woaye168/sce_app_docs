@@ -1,0 +1,12 @@
+/* 结构图：无背景色，目录/连接线颜色跟随明暗主题 */
+.ftree {
+  font-family: var(--vp-font-family-mono);
+  font-size: 13px;
+  line-height: 1.6;
+  padding: 0;
+  margin: 0;
+  overflow-x: auto;
+  background: transparent;
+}
+.ft-dir { color: var(--vp-c-text-1); font-weight: bold; }
+.ft-line { color: var(--vp-c-text-3); }

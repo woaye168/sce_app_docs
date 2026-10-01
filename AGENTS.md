@@ -20,7 +20,10 @@ src/main.rs            # 入口（CLI serve 分发 → bgd_appsdk::app::run）+ 
 src/core/
   config.rs            # 双配置（全局 exe 旁 config.json + 项目 .bgd/docs.json）
   node.rs              # node.exe 探测
-  site.rs              # 站点生成：junction 聚合源 + index.md 导航页 + config.mjs + 主题（含 AiChat.vue）
+  site.rs              # 站点生成：junction 聚合源 + index.md 导航页 + config.mjs 生成 + 主题文件落盘
+  site_templates.rs    # 前端模板入口集：纯 include_str!，无前端代码字符串
+frontend/              # 站点主题真实前端源码（AiChat.vue / theme_index.js / custom.css / stream_md.mjs）
+                       # ——编译期 include_str! 嵌入 exe，site.rs 构建时写入主题目录；禁止回 rs 写前端字符串
   builder.rs           # vitepress build 短命 spawn（Job Object KILL_ON_JOB_CLOSE 兜底防孤儿）
   httpd.rs             # 内嵌 HTTP 服务（tiny_http）：静态 + /_api/* + /_mcp 路由
   watcher.rs           # notify 监听 md 变更（真实路径，不经 junction）
