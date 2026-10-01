@@ -271,7 +271,7 @@ pub fn write_site_config(
     // mermaid viewer：```mermaid 代码块 → MermaidViewer 组件（点击开全屏 viewer：缩放/拖拽/下载）；
     // 三件套自注册（插件明确不要 withMermaid 包裹；fork 锁 commit；暗色组件自适配）
     let cfg_text = format!(
-        "import {{ defineConfig }} from 'vitepress'\nimport {{ mermaidMarkdown, mermaidPlugin }} from 'vitepress-plugin-mermaid-viewer'\n\nexport default defineConfig({{\n  title: '{title}',\n  description: '{description}',\n  lang: '{lang}',\n  lastUpdated: {last_updated},\n  cleanUrls: {clean_urls},\n  ignoreDeadLinks: true,\n  rewrites: {{\n{rewrites}\n  }},\n  markdown: {{\n    config(md) {{ mermaidMarkdown(md) }},\n  }},\n  themeConfig: {{\n{search_block}    sidebar: [\n{sidebar_items}\n    ],\n  }},\n  vite: {{\n    plugins: [mermaidPlugin()],\n    resolve: {{ preserveSymlinks: {preserve_symlinks} }},\n  }},\n}})\n",
+        "import {{ defineConfig }} from 'vitepress'\nimport {{ mermaidMarkdown, mermaidPlugin }} from 'vitepress-plugin-mermaid-viewer'\n\nexport default defineConfig({{\n  title: '{title}',\n  description: '{description}',\n  lang: '{lang}',\n  lastUpdated: {last_updated},\n  cleanUrls: {clean_urls},\n  ignoreDeadLinks: true,\n  // 手机端禁页面双指/双击缩放（面板是悬浮 UI，页面被拖大很难恢复；mermaid viewer 全屏是自身 transform 手势缩放，不受影响）\n  head: [['meta', {{ name: 'viewport', content: 'width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no' }}]],\n  rewrites: {{\n{rewrites}\n  }},\n  markdown: {{\n    config(md) {{ mermaidMarkdown(md) }},\n  }},\n  themeConfig: {{\n{search_block}    sidebar: [\n{sidebar_items}\n    ],\n  }},\n  vite: {{\n    plugins: [mermaidPlugin()],\n    resolve: {{ preserveSymlinks: {preserve_symlinks} }},\n  }},\n}})\n",
         title = project_name,
         description = tpl.description,
         lang = tpl.lang,
@@ -294,6 +294,8 @@ pub fn write_site_config(
     std::fs::write(theme_dir.join("custom.css"),
         "/* 结构图：无背景色，目录/连接线颜色跟随明暗主题 */\n.ftree {\n  font-family: var(--vp-font-family-mono);\n  font-size: 13px;\n  line-height: 1.6;\n  padding: 0;\n  margin: 0;\n  overflow-x: auto;\n  background: transparent;\n}\n.ft-dir { color: var(--vp-c-text-1); font-weight: bold; }\n.ft-line { color: var(--vp-c-text-3); }\n")?;
     std::fs::write(theme_dir.join("AiChat.vue"), crate::core::site_templates::AI_CHAT_VUE)?;
+    // 流式分段扫描器（真实前端文件嵌入，AiChat.vue import 它）
+    std::fs::write(theme_dir.join("stream_md.mjs"), crate::core::site_templates::STREAM_MD_MJS)?;
     Ok(dir)
 }
 

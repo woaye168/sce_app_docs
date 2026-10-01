@@ -121,7 +121,9 @@ const SYSTEM_PROMPT: &str = "你是项目文档助手。回答用户关于本项
 输出格式（前端会实时渲染，务必遵守）：\n\
 - 需要画图（流程/架构/时序/关系说明）时，一律用 ```mermaid 代码块输出 mermaid 源码，不要画 ASCII 图；\n\
   mermaid 源码里禁止写硬编码颜色（fill/stroke 色值），要强调就交给主题配色，否则暗色主题下会看不清；\n\
-  节点文字含括号/特殊字符时必须用引号包住（如 A[\"co.promise() 创建\"]），否则解析报错。\n\
+  节点文字含括号/特殊字符时必须用引号包住（如 A[\"co.promise() 创建\"]），否则解析报错；\n\
+  连线带文字一律用实线管道语法 A -->|文字| B（最稳）；虚线箭头带文字写 A -. 文字 .-> B，\n\
+  禁止把文字塞在箭头中间（如 <-.- \"文字\" .-> 是非法语法，会 Parse error）。\n\
 - 给出代码时，一律用带语言标记的代码块（如 ```lua、```rust、```sql），不要用行内代码写多行代码。";
 
 /// 组装 system prompt：page 非空时追加「当前文档」上下文（前端传用户正在阅读的页面相对路径，
@@ -229,6 +231,7 @@ mod tests {
         assert!(SYSTEM_PROMPT.contains("```"), "应引导代码 fence：{SYSTEM_PROMPT}");
         assert!(SYSTEM_PROMPT.contains("参考由系统"), "应禁止正文列参考：{SYSTEM_PROMPT}");
         assert!(SYSTEM_PROMPT.contains("硬编码颜色"), "应禁止 mermaid 硬编码颜色：{SYSTEM_PROMPT}");
+        assert!(SYSTEM_PROMPT.contains("-->|"), "应给连线标签的安全写法示例：{SYSTEM_PROMPT}");
     }
 
     /// 当前文档上下文：传了页面路径 → system prompt 带上并点名「当前文档」；空 → 原 prompt

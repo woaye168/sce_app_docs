@@ -1,11 +1,15 @@
 //! 站点模板常量（从 site.rs 拆出，单文件 500 行守则）：前端组件等大块静态文本
 
+/// 流式 markdown 分段扫描器（真实前端文件，node 可测；构建时写入主题目录供 AiChat.vue import）
+pub(crate) const STREAM_MD_MJS: &str = include_str!("../../frontend/stream_md.mjs");
+
 /// AI 问答组件（毛玻璃风格；明暗走 VitePress CSS 变量；SSE 流式 + 思考链/工具调用折叠 + 出处链接）
 pub(crate) const AI_CHAT_VUE: &str = r##"<script setup>
-import { ref, reactive, nextTick, computed, watch } from 'vue'
+import { ref, reactive, nextTick, computed, watch, h } from 'vue'
 import { useRouter, useData } from 'vitepress'
 import { MermaidViewer } from 'vitepress-plugin-mermaid-viewer/client'
 import MarkdownIt from 'markdown-it'
+import { scanStream, vpFence } from './stream_md.mjs'
 
 const router = useRouter()
 const { page: vpPage } = useData() // 当前页 relativePath（与 kb 文件路径一致，「解释当前文档」上下文）
@@ -36,6 +40,9 @@ async function goSource(e) {
 }
 
 const md = new MarkdownIt({ linkify: true, breaks: true })
+// 代码块产出 VP 包裹结构（div.language-xxx + lang 角标）→ 气泡挂 vp-doc 即可全套复用
+// VitePress 内容样式（代码块/表格/引用/列表/行内 code），不再自绘卡片
+md.renderer.rules.fence = vpFence
 const open = ref(false)
 const configured = ref(true)
 const modelName = ref('')
@@ -91,30 +98,19 @@ async function toggle() {
 }
 async function scrollDown() { await nextTick(); listEl.value && listEl.value.scrollTo({ top: 99999999 }) }
 function esc(s) { return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;') }
-// 流式分段：正文按「已闭合 fence」切三类段——流动 md 段 v-html；mermaid 段 MermaidViewer；
-// 已闭合代码 fence 切出成 CodeSeg 静态段（mounted 时高亮一次，不再被后续 delta 的 v-html 重渲冲掉）。
-// 收益统一：fence 一闭合，图即渲染、代码即高亮，不等整轮 done。未闭合尾部 fence 留在 md 段按代码显示。
-function parseSegments(text) {
-  const segs = []
-  const re = /```(\w*)\s*\n([\s\S]*?)```/g
-  let last = 0, m, i = 0
-  while ((m = re.exec(text))) {
-    if (m.index > last) segs.push({ type: 'md', html: md.render(text.slice(last, m.index)) })
-    const lang = (m[1] || '').toLowerCase()
-    if (lang === 'mermaid' || lang === 'mmd') {
-      segs.push({ type: 'mermaid', graph: encodeURIComponent(m[2].trim()), key: 'mm' + i })
-    } else {
-      segs.push({ type: 'code', html: md.render(m[0]), key: 'cc' + i })
-    }
-    last = m.index + m[0].length; i++
-  }
-  if (last < text.length) segs.push({ type: 'md', html: md.render(text.slice(last)) })
-  return segs
+// 流式渲染：scanStream（frontend/stream_md.mjs，纯函数有 node 测试）把正文按「已闭合 fence」切块——
+// md 块无状态随流重渲；code/mermaid 块带稳定 key（cc0/mm1…）保组件身份，fence 一闭合即
+// 高亮/渲染，之后不再被后续 delta 冲掉。所有块渲染进同一个气泡（视觉上是完整一条消息）。
+function renderSegs(text) {
+  return scanStream(text).map(s =>
+    s.type === 'mermaid' ? { ...s, graph: encodeURIComponent(s.graph) } : { ...s, html: md.render(s.text) }
+  )
 }
-// 代码段组件：静态 html（v-html 不随流式重渲），挂载后高亮一次
+// 代码块组件：静态 html（不重渲），挂载后高亮一次。
+// 必须用 render 函数而非 template 字符串——vue 若解析为 runtime-only 构建，运行时 template 编译不了会静默渲染为空（踩过）。
 const CodeSeg = {
   props: { html: String },
-  template: '<div class="ai-bubble ai-code-seg" v-html="html"></div>',
+  render() { return h('div', { class: 'ai-code-seg', innerHTML: this.html }) },
   mounted() { highlightCodeIn(this.$el) }
 }
 // 代码块语法高亮（highlight.js common 集懒加载，只在有代码块时下发；mermaid 段不走这）
@@ -246,11 +242,13 @@ async function send() {
             <span class="ai-tool-name">{{ t.running ? '⏳' : '✓' }} {{ t.name }}</span>
             <span class="ai-tool-sum">{{ t.running ? '执行中…' : t.summary }}</span>
           </div>
-          <template v-for="(seg, si) in parseSegments(m.text)" :key="si">
-            <MermaidViewer v-if="seg.type === 'mermaid'" class="ai-mmd" :graph="seg.graph" :id="seg.key + '-' + i" />
-            <CodeSeg v-else-if="seg.type === 'code'" :html="seg.html" />
-            <div v-else class="ai-bubble" v-html="seg.html"></div>
-          </template>
+          <div v-if="m.text" class="ai-bubble ai-body vp-doc">
+            <template v-for="seg in renderSegs(m.text)" :key="seg.key">
+              <MermaidViewer v-if="seg.type === 'mermaid'" class="ai-mmd" :graph="seg.graph" :id="seg.key + '-' + i" />
+              <CodeSeg v-else-if="seg.type === 'code'" :html="seg.html" />
+              <div v-else class="ai-md" v-html="seg.html"></div>
+            </template>
+          </div>
           <div v-if="m.errHtml" class="ai-bubble" v-html="m.errHtml"></div>
           <div v-if="m.sources && m.sources.length" class="ai-sources" @click="goSource">
             <div class="ai-sources-title">参考：</div>
@@ -282,14 +280,15 @@ async function send() {
   width: 420px; max-width: calc(100vw - 48px); height: 600px; max-height: calc(100vh - 120px);
   display: flex; flex-direction: column; overflow: hidden;
   border-radius: 18px;
-  /* 毛玻璃：底色不透明度拉高防底下文字穿透叠加（72% 实测看不清），blur 加大 */
-  background: color-mix(in srgb, var(--vp-c-bg) 90%, transparent);
+  /* 液态玻璃：blur 已真实生效（此前被 -webkit 前缀坑吞掉），透明度可以降下来；
+     inset 顶边高光 + 外阴影 = 苹果的镜面高光边手感 */
+  background: color-mix(in srgb, var(--vp-c-bg) 62%, transparent);
   backdrop-filter: blur(28px) saturate(180%);
   border: 1px solid color-mix(in srgb, var(--vp-c-divider) 60%, transparent);
-  box-shadow: 0 24px 64px rgba(0, 0, 0, .18);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .35), 0 24px 64px rgba(0, 0, 0, .18);
 }
-/* 暗色下 .18 的黑影比背景还亮会变「灰晕」——暗色阴影要更深更不透明 */
-html.dark .ai-panel { box-shadow: 0 24px 64px rgba(0, 0, 0, .55); }
+/* 暗色下 .18 的黑影比背景还亮会变「灰晕」——暗色阴影要更深更不透明，高光也压暗 */
+html.dark .ai-panel { box-shadow: inset 0 1px 0 rgba(255, 255, 255, .08), 0 24px 64px rgba(0, 0, 0, .55); }
 /* 尺寸档：tall 放大（高度拉满，宽度不变）；full 全屏（宽高拉满，留 16px 呼吸边） */
 .ai-panel.tall { top: 16px; bottom: 84px; height: auto; max-height: none; }
 .ai-panel.full { inset: 16px; width: auto; height: auto; max-width: none; max-height: none; }
@@ -328,7 +327,7 @@ html.dark .ai-panel { box-shadow: 0 24px 64px rgba(0, 0, 0, .55); }
 .ai-dock-pop {
   min-width: 200px; max-width: 280px; max-height: 320px; overflow-y: auto; padding: 5px; margin-left: 2px;
   border-radius: 14px;
-  background: color-mix(in srgb, var(--vp-c-bg) 82%, transparent);
+  background: color-mix(in srgb, var(--vp-c-bg) 68%, transparent);
   backdrop-filter: blur(24px) saturate(180%);
   border: 1px solid color-mix(in srgb, var(--vp-c-divider) 55%, transparent);
   box-shadow: 0 12px 40px rgba(0, 0, 0, .18);
@@ -376,7 +375,7 @@ html.dark .ai-dock-pop { box-shadow: 0 12px 40px rgba(0, 0, 0, .55); }
   position: absolute; right: 0; top: calc(100% + 6px); z-index: 30;
   min-width: 180px; max-width: 260px; max-height: 280px; overflow-y: auto; padding: 5px;
   border-radius: 14px;
-  background: color-mix(in srgb, var(--vp-c-bg) 82%, transparent);
+  background: color-mix(in srgb, var(--vp-c-bg) 68%, transparent);
   backdrop-filter: blur(24px) saturate(180%);
   border: 1px solid color-mix(in srgb, var(--vp-c-divider) 55%, transparent);
   box-shadow: 0 12px 40px rgba(0, 0, 0, .18);
@@ -405,19 +404,13 @@ html.dark .ai-msel-pop { box-shadow: 0 12px 40px rgba(0, 0, 0, .55); }
   border-radius: 14px 14px 14px 4px;
 }
 .ai-bubble { padding: 10px 14px; font-size: 14px; line-height: 1.7; word-break: break-word; }
-.ai-bubble :deep(p) { margin: 4px 0; }
-.ai-bubble :deep(pre) { background: var(--vp-c-bg-mute, rgba(0,0,0,.06)); padding: 8px 10px; border-radius: 8px; overflow-x: auto; font-size: 12px; margin: 6px 0; }
-.ai-bubble :deep(code) { font-family: var(--vp-font-family-mono); font-size: .9em; }
-.ai-bubble :deep(:not(pre) > code) { background: var(--vp-c-bg-mute, rgba(0,0,0,.08)); padding: 1px 5px; border-radius: 4px; }
-/* MD 全量样式：表格/引用/列表/分隔线/标题间距（无样式时用户观感=「不支持 MD」） */
-.ai-bubble :deep(table) { border-collapse: collapse; margin: 8px 0; display: block; overflow-x: auto; }
-.ai-bubble :deep(th), .ai-bubble :deep(td) { border: 1px solid var(--vp-c-divider); padding: 4px 10px; font-size: 13px; }
-.ai-bubble :deep(th) { background: var(--vp-c-bg-mute, rgba(0,0,0,.05)); font-weight: 600; }
-.ai-bubble :deep(blockquote) { margin: 6px 0; padding: 2px 12px; border-left: 3px solid var(--vp-c-brand); color: var(--vp-c-text-2); }
-.ai-bubble :deep(ul), .ai-bubble :deep(ol) { padding-left: 20px; margin: 4px 0; }
-.ai-bubble :deep(h1), .ai-bubble :deep(h2), .ai-bubble :deep(h3), .ai-bubble :deep(h4) { margin: 10px 0 4px; line-height: 1.4; }
-.ai-bubble :deep(hr) { border: none; border-top: 1px solid var(--vp-c-divider); margin: 10px 0; }
-.ai-bubble :deep(a) { color: var(--vp-c-brand); }
+/* 内容样式（代码块/表格/引用/列表/行内 code）全套走 vp-doc 主题变量，明暗自适应；
+   下面只留聊天气泡语境的间距微调（vp-doc 默认是给正文文章的，间距偏大） */
+.ai-body :deep(p) { margin: 6px 0; }
+.ai-body :deep(h1), .ai-body :deep(h2), .ai-body :deep(h3), .ai-body :deep(h4) { margin: 10px 0 4px; line-height: 1.4; border: none; padding: 0; }
+.ai-body :deep([class*="language-"]) { margin: 8px 0; }
+/* vp-doc 的 pre 只有垂直 padding（横向靠 shiki 的 .line span 撑，我们没有）→ 补横向 padding */
+.ai-body :deep([class*="language-"] pre) { padding: 10px 14px; }
 .ai-bubble :deep(.err) { color: #e05555; }
 .ai-mmd { margin: 6px 0; }
 /* 代码高亮 token 色（自绘明暗双色，VSCode 风格近似；不引 hljs 主题 css 避免明暗切换问题） */

@@ -69,7 +69,7 @@ doc/research/          # 设计文档（架构重构方案等）
 
 **出处锚点**：检索命中的 url 拼 `#标题锚点`（kb.rs `heading_anchor`，**严格对齐 @mdit-vue/shared slugify**：NFKD→特殊字符→`-`→折叠→去首尾→数字开头加`_`→小写，`·`保留——和 GitHub slugger 不同，实测比对过）；AiChat 出处点击自接管（goSource）：站点 cleanUrls=false 路由是 .html 风格，clean 路径不匹配会整页刷新丢 SPA 上下文导致锚点滚动失败。
 
-**对话面板交互（v0.3.1 追加）**：流式分段渲染（parseSegments 按已闭合 fence 切 md/code/mermaid 段，fence 闭合即渲染/高亮）；侧边用户消息锚点导航（左缘竖点 rail，PC hover 展开、移动端点展开/点外或点锚点关闭——**弹层必须是 rail 旁的 flex 兄弟节点**（in-flow），absolute top:0 会让弹层与垂直居中的 rail 错位，hover 路径一离开就 mouseleave 关弹层）；窗口三档尺寸（''/tall/full + 移动端媒体查询占满屏，goSource 自动退出 full）。**大坑：手写 `-webkit-backdrop-filter` 会被 lightningcss 去重吞掉无前缀 `backdrop-filter`**——Chrome 142+ 已不支持 -webkit 别名，产物里只剩 webkit 前缀 = 毛玻璃从不生效（「穿透看不清」根治其实是透明度）。**只写无前缀属性**，交给构建处理。
+**对话面板交互（v0.3.1 追加）**：流式渲染=单气泡增量提交——一条消息一个 `.ai-body` 气泡，内部按已闭合 fence 切 md/code/mermaid 块（`frontend/stream_md.mjs` 纯函数 `scanStream`，真实前端文件 `include_str!` 嵌入、node --test 可测；code/mermaid 块带稳定 key cc0/mm1 保组件身份，fence 闭合即高亮/渲染不被后续 delta 冲掉）。**禁止把块渲染成独立气泡卡片**（机制泄漏成视觉，被用户打回）。**坑：局部组件写运行时 template 字符串在 runtime-only vue 下静默渲染为空**（CodeSeg 曾因此整段代码消失）——必须用 render 函数。侧边用户消息锚点导航（左缘竖点 rail，PC hover 展开、移动端点展开/点外或点锚点关闭——**弹层必须是 rail 旁的 flex 兄弟节点**（in-flow），absolute top:0 会让弹层与垂直居中的 rail 错位，hover 路径一离开就 mouseleave 关弹层）；窗口三档尺寸（''/tall/full + 移动端媒体查询占满屏，goSource 自动退出 full）；head 注入 viewport `user-scalable=no` 防手机端页面被捏合拖大（mermaid viewer 是自身 transform 手势缩放，不受影响）。**大坑：手写 `-webkit-backdrop-filter` 会被 lightningcss 去重吞掉无前缀 `backdrop-filter`**——Chrome 142+ 已不支持 -webkit 别名，产物里只剩 webkit 前缀 = 毛玻璃从不生效（「穿透看不清」根治其实是透明度）。**只写无前缀属性**，交给构建处理。暗色下代码块底色要用白 7% 而不是黑 6%（深底上再压黑等于没底色）。**内容卡片一律复用 vp-doc**：气泡容器挂 `vp-doc` class + `vpFence` 产出 VP 代码块包裹结构（div.language-xxx + lang 角标），代码/表格/引用/列表全走 VP 主题样式，禁止自绘内容卡片；vp-doc 的 pre 横向 padding 依赖 shiki .line span，非 shiki 来源要自补横向 padding。mermaid 连线标签一律 `A -->|文字| B`（`<-.- "x" .->` 非法，LLM 高频踩）。
 
 ## 使用方约定（改代码前必读）
 
@@ -103,6 +103,7 @@ sce_app_docs serve --project-path <项目根> [--port <端口>] [--lan] [--allow
 ```bash
 cargo test --lib                              # 单元测试（42 个，含真实模型加载约 15s；无 D:\local_models 时自动跳过模型测试）
 cargo test --test lifecycle -- --test-threads=1  # 生命周期 E2E（真实 exe + vitepress build + 索引，约 1 分钟）
+node --test test/stream_md.test.mjs           # 流式分段解析器（frontend/stream_md.mjs，零依赖）
 # 真实 LLM 链路（可选）：设 BGD_TEST_LLM_BASE/KEY/MODEL 三个环境变量后跑 ask_live_llm_streaming
 ```
 
