@@ -2,7 +2,7 @@
 
 /// AI 问答组件（毛玻璃风格；明暗走 VitePress CSS 变量；SSE 流式 + 思考链/工具调用折叠 + 出处链接）
 pub(crate) const AI_CHAT_VUE: &str = r##"<script setup>
-import { ref, reactive, nextTick, computed, watch, createApp } from 'vue'
+import { ref, reactive, nextTick, computed, watch } from 'vue'
 import { useRouter, useData } from 'vitepress'
 import { MermaidViewer } from 'vitepress-plugin-mermaid-viewer/client'
 import MarkdownIt from 'markdown-it'
@@ -71,18 +71,20 @@ async function toggle() {
 }
 async function scrollDown() { await nextTick(); listEl.value && listEl.value.scrollTo({ top: 99999999 }) }
 function esc(s) { return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;') }
-// 气泡内 mermaid 代码块 → 手动挂载 MermaidViewer 组件（文档页同款全屏交互：点击放大/缩放/拖拽/下载；
-// 不再 inline svg 裸渲染——不可交互看不清。v-html 不编译组件，必须 createApp 手动 mount）
-async function renderMermaidIn(el) {
-  const blocks = el?.querySelectorAll('pre code.language-mermaid') || []
-  for (const b of blocks) {
-    const div = document.createElement('div')
-    div.className = 'ai-mermaid'
-    b.parentElement.replaceWith(div)
-    try {
-      createApp(MermaidViewer, { graph: encodeURIComponent(b.textContent), id: 'mq' + Math.random().toString(36).slice(2) }).mount(div)
-    } catch { /* 挂载失败移除容器 */ div.remove() }
+// 流式分段：正文按「已闭合的 mermaid 块」切段——md 段走 v-html，mermaid 段走 MermaidViewer 组件。
+// 关键收益：fence 一闭合图立刻渲染（不用等整轮 done）；组件按 key 保身份，后续 delta 不重挂载。
+// 未闭合的尾部 fence 自然落在 md 段里按代码块显示（与原来一致）。
+function parseSegments(text) {
+  const segs = []
+  const re = /```mermaid\s*\n([\s\S]*?)```/g
+  let last = 0, m, i = 0
+  while ((m = re.exec(text))) {
+    if (m.index > last) segs.push({ type: 'md', html: md.render(text.slice(last, m.index)) })
+    segs.push({ type: 'mermaid', graph: encodeURIComponent(m[1].trim()), key: 'mm' + i })
+    last = m.index + m[0].length; i++
   }
+  if (last < text.length) segs.push({ type: 'md', html: md.render(text.slice(last)) })
+  return segs
 }
 // 代码块语法高亮（highlight.js common 集懒加载，只在有代码块时下发；mermaid 块已被换掉，跳过）
 async function highlightCodeIn(el) {
@@ -95,10 +97,14 @@ async function send() {
   const q = input.value.trim()
   if (!q || sending.value) return
   input.value = ''
-  const history = messages.value.filter(m => m.role === 'user' || m.role === 'assistant').map(m => ({ role: m.role, content: m.text }))
+  // history 过滤空 assistant 消息：失败/空回答进了历史，下一轮 OpenAI 直接 400
+  //（"assistant must not be empty"——对话 2-3 次后全挂的元凶之一）
+  const history = messages.value
+    .filter(m => (m.role === 'user' || m.role === 'assistant') && m.text && m.text.trim())
+    .map(m => ({ role: m.role, content: m.text }))
   messages.value.push({ role: 'user', text: q, html: md.render(q) })
   // 必须 reactive：裸对象 push 进 ref 数组后，经原引用改属性不触发更新（曾致「卡很久一次性出」）
-  const ai = reactive({ role: 'assistant', text: '', html: '', think: '', thinkHtml: '', thinkOpen: true, tools: [], sources: [], stage: '发送中…', elapsed: 0 })
+  const ai = reactive({ role: 'assistant', text: '', errHtml: '', think: '', thinkHtml: '', thinkOpen: true, tools: [], sources: [], stage: '发送中…', elapsed: 0 })
   messages.value.push(ai)
   sending.value = true
   scrollDown()
@@ -113,7 +119,7 @@ async function send() {
     })
     if (!resp.ok) {
       const t = await resp.json().catch(() => ({}))
-      ai.html = '<p class="err">' + esc(t.error || ('HTTP ' + resp.status)) + '</p>'
+      ai.errHtml = '<p class="err">' + esc(t.error || ('HTTP ' + resp.status)) + '</p>'
       clearInterval(timer); sending.value = false
       return
     }
@@ -134,23 +140,22 @@ async function send() {
         try { data = JSON.parse(t.slice(5)) } catch { continue }
         if (data.type === 'start') { ai.stage = '已连接，等待模型响应…' }
         else if (data.type === 'think') { ai.stage = '思考中…'; ai.think += data.text; ai.thinkHtml = md.render(ai.think) }
-        else if (data.type === 'delta') { ai.stage = ''; if (ai.think) ai.thinkOpen = false; ai.text += data.text; ai.html = md.render(ai.text); scrollDown() }
+        else if (data.type === 'delta') { ai.stage = ''; if (ai.think) ai.thinkOpen = false; ai.text += data.text; scrollDown() }
         else if (data.type === 'tool_start') { ai.stage = '正在调用 ' + data.name + '…'; ai.tools.push({ name: data.name, args: data.args, summary: '', running: true }); scrollDown() }
         else if (data.type === 'tool_call') { ai.stage = '整理中…'; const c = ai.tools.find(x => x.name === data.name && x.running); if (c) { c.summary = data.summary; c.running = false } else { ai.tools.push({ name: data.name, summary: data.summary, running: false }) } }
         else if (data.type === 'sources') { ai.sources = data.hits }
-        else if (data.type === 'error') { ai.html += '<p class="err">' + esc(data.text) + '</p>' }
+        else if (data.type === 'error') { ai.errHtml += '<p class="err">' + esc(data.text) + '</p>' }
         if (data.type === 'done' || data.type === 'error') { finished = true; try { reader.cancel() } catch {}; break } // 服务端 Connection: close 未必真关，收到终止帧主动结束
       }
     }
   } catch (e) {
-    ai.html += '<p class="err">' + esc(String(e)) + '</p>'
+    ai.errHtml += '<p class="err">' + esc(String(e)) + '</p>'
   }
   clearInterval(timer)
   ai.stage = ''
   sending.value = false
   await scrollDown()
-  renderMermaidIn(listEl.value) // done 后把气泡里的 mermaid 代码块渲染成图
-  highlightCodeIn(listEl.value) // done 后代码块上语法高亮
+  highlightCodeIn(listEl.value) // done 后代码块上语法高亮（mermaid 已由分段渲染接管）
 }
 </script>
 
@@ -190,7 +195,11 @@ async function send() {
             <span class="ai-tool-name">{{ t.running ? '⏳' : '✓' }} {{ t.name }}</span>
             <span class="ai-tool-sum">{{ t.running ? '执行中…' : t.summary }}</span>
           </div>
-          <div class="ai-bubble" v-html="m.html"></div>
+          <template v-for="(seg, si) in parseSegments(m.text)" :key="si">
+            <MermaidViewer v-if="seg.type === 'mermaid'" class="ai-mmd" :graph="seg.graph" :id="seg.key + '-' + i" />
+            <div v-else class="ai-bubble" v-html="seg.html"></div>
+          </template>
+          <div v-if="m.errHtml" class="ai-bubble" v-html="m.errHtml"></div>
           <div v-if="m.sources && m.sources.length" class="ai-sources" @click="goSource">
             <div class="ai-sources-title">参考：</div>
             <a v-for="(s, k) in m.sources" :key="k" :href="s.url" :title="s.file + (s.heading ? ' › ' + s.heading : '')">{{ shortFile(s.file) }}<template v-if="s.heading"> › {{ shortHeading(s.heading) }}</template></a>
@@ -300,7 +309,7 @@ html.dark .ai-msel-pop { box-shadow: 0 12px 40px rgba(0, 0, 0, .55); }
 .ai-bubble :deep(hr) { border: none; border-top: 1px solid var(--vp-c-divider); margin: 10px 0; }
 .ai-bubble :deep(a) { color: var(--vp-c-brand); }
 .ai-bubble :deep(.err) { color: #e05555; }
-.ai-mermaid { overflow-x: auto; margin: 6px 0; }
+.ai-mmd { margin: 6px 0; }
 /* 代码高亮 token 色（自绘明暗双色，VSCode 风格近似；不引 hljs 主题 css 避免明暗切换问题） */
 .ai-bubble :deep(.hljs-keyword), .ai-bubble :deep(.hljs-literal), .ai-bubble :deep(.hljs-selector-tag) { color: #af4bcf; }
 .ai-bubble :deep(.hljs-string), .ai-bubble :deep(.hljs-regexp) { color: #2e7d32; }
