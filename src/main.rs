@@ -95,6 +95,8 @@ struct App {
     ai_test_result: String,
     ai_models: Vec<String>,
     ai_models_rx: Option<std::sync::mpsc::Receiver<Result<Vec<String>, String>>>,
+    /// 「重建向量索引」确认对话框开关（主页）
+    confirm_reindex: bool,
 }
 
 impl Default for App {
@@ -112,6 +114,7 @@ impl Default for App {
             ai_test_result: String::new(),
             ai_models: Vec::new(),
             ai_models_rx: None,
+            confirm_reindex: false,
         }
     }
 }

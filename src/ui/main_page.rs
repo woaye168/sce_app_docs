@@ -44,7 +44,47 @@ impl App {
         ui.add_space(8.0);
         match phase {
             service::Phase::Serving => {
-                ui.label(format!("运行中：http://localhost:{}", self.server.port));
+                // 访问地址清单（start 时按 lan/域名开关算好：localhost / 局域网 IP / 允许域名）
+                let urls = self.server.access_urls.clone();
+                ui.label(format!("运行中：{}", urls.first().cloned().unwrap_or_default()));
+                if urls.len() > 1 {
+                    for u in &urls[1..] {
+                        ui.horizontal(|ui| {
+                            ui.label(format!("也可访问：{u}"));
+                            if ui.small_button("复制").clicked() {
+                                ui.ctx().copy_text(u.clone());
+                            }
+                        });
+                    }
+                }
+                // 重建向量索引（破坏性：清空重 embed，需确认）
+                if ui.small_button("重建向量索引").clicked() {
+                    self.confirm_reindex = true;
+                }
+                if self.confirm_reindex {
+                    let mut open = true;
+                    egui::Window::new("确认重建")
+                        .collapsible(false)
+                        .resizable(false)
+                        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                        .open(&mut open)
+                        .show(ui.ctx(), |ui| {
+                            ui.label("将清空现有向量并全量重建（所有文档重新向量化，耗时数分钟，进度见索引状态条）。");
+                            ui.add_space(8.0);
+                            ui.horizontal(|ui| {
+                                if ui.button("取消").clicked() {
+                                    self.confirm_reindex = false;
+                                }
+                                if ui.button("确认重建").clicked() {
+                                    service::reindex(&self.server);
+                                    self.confirm_reindex = false;
+                                }
+                            });
+                        });
+                    if !open {
+                        self.confirm_reindex = false;
+                    }
+                }
                 // 索引状态条（§6.1：状态可见、不阻塞）
                 if let Ok(s) = self.server.index_status.read() {
                     match s.state.as_str() {

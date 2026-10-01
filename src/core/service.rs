@@ -63,6 +63,8 @@ pub struct ServiceState {
     pub index_status: indexer::SharedIndexStatus,
     /// API 共享状态（检索上下文在里面）
     api: Option<Arc<httpd::ApiState>>,
+    /// 访问地址清单（start 时按 lan/域名开关算好，GUI 展示用；首条恒为 localhost）
+    pub access_urls: Vec<String>,
 }
 
 impl Default for ServiceState {
@@ -85,6 +87,7 @@ impl Default for ServiceState {
             _watcher: None,
             index_status: indexer::new_shared_status(),
             api: None,
+            access_urls: Vec::new(),
         }
     }
 }
@@ -137,6 +140,14 @@ pub fn start(project_root: &std::path::Path, global: &GlobalConfig, project: &Pr
         max_rounds: global.max_tool_rounds.clamp(1, 20),
         mcp_sessions: Mutex::new(crate::core::mcp::SessionMgr::new()),
     });
+    // 访问地址清单：localhost 恒在；lan 开 → 局域网 IP；域名开关开 → 允许域名
+    //（httpd::start 会 move hosts，先算好）
+    let access_urls = crate::core::net::access_urls(
+        port,
+        global.lan_access,
+        if global.lan_access { crate::core::net::lan_ipv4() } else { None }.as_deref(),
+        &hosts,
+    );
     let httpd = match httpd::start(dist_root.clone(), port, global.lan_access, hosts, Some(api.clone())) {
         Ok(h) => h,
         Err(e) => {
@@ -146,6 +157,7 @@ pub fn start(project_root: &std::path::Path, global: &GlobalConfig, project: &Pr
         }
     };
     st.api = Some(api);
+    st.access_urls = access_urls;
     tracing::info!("httpd 已监听 端口{}（lan={}）", port, global.lan_access);
 
     // 后台构建链：装依赖（若缺）→ vitepress build 到 dist-a
@@ -192,7 +204,27 @@ pub fn stop(st: &mut ServiceState) {
     st.watch_paths.clear();
     st._watcher = None;
     st.api = None;
+    st.access_urls.clear();
     st.index_status = indexer::new_shared_status();
+}
+
+/// 全量重建向量索引（GUI 按钮，需用户确认后调用）：后台线程清库 + 全量重 embed，
+/// 状态经 index_status 可见（indexing → ready）。未在 Serving 时静默忽略。
+pub fn reindex(st: &ServiceState) {
+    let Some(api) = &st.api else { return };
+    let api = api.clone();
+    std::thread::spawn(move || {
+        match indexer::force_reindex(&api.search, &api.status) {
+            Ok(n) => tracing::info!("索引全量重建完成: {} 块", n),
+            Err(e) => {
+                tracing::info!("索引全量重建失败: {e}");
+                if let Ok(mut s) = api.status.write() {
+                    s.state = "failed".into();
+                    s.error = e;
+                }
+            }
+        }
+    });
 }
 
 /// UI/CLI 轮询：收首次构建结果、收监听事件、debounce 触发重建、收重建结果

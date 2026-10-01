@@ -35,6 +35,7 @@ frontend/              # 站点主题真实前端源码（AiChat.vue / theme_ind
   llm.rs               # OpenAI 兼容 LLM 客户端（SSE 流式 / reasoning_content / tool_calls 聚合）
   ask.rs               # 多轮 Tool Calling 问答管线（工具定义/执行与 MCP 同一份实现）
   mcp.rs               # MCP Streamable HTTP（JSON-RPC + session + SSE）
+  net.rs               # 局域网 IP 探测（UDP connect 选路由不发包）+ 访问地址清单计算
 src/ui/                # main_page.rs / settings.rs / ai.rs / mcp.rs / help.rs（impl App 分散定义）
 test/lifecycle.rs      # 生命周期 E2E 测试（黑盒 spawn 真实 exe serve；见「测试」节）
 app.json               # 应用市场静态元数据（不含版本；CI 合成 app-release.json）

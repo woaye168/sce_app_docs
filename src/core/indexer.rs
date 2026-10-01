@@ -185,6 +185,26 @@ pub fn sync_index(
     Ok(n)
 }
 
+/// 全量重建索引（GUI「重建向量索引」按钮）：清空向量库全部条目后走增量同步——
+/// sync_index 会发现所有文件都是「新增」从而全部重 embed。模型已常驻则秒级起跳。
+pub fn force_reindex(
+    ctx: &std::sync::Mutex<SearchCtx>,
+    status: &SharedIndexStatus,
+) -> Result<usize, String> {
+    let (home, site) = {
+        let g = ctx.lock().map_err(|_| "检索上下文锁失败".to_string())?;
+        (g.home.clone(), g.site.clone())
+    };
+    let kb_file = kb_path(&home, &site);
+    let mut kb = Kb::open(&kb_file)?;
+    let all: Vec<String> = kb.file_hashes().keys().cloned().collect();
+    for f in &all {
+        kb.remove_file(f)?;
+    }
+    drop(kb); // 释放连接再进 sync（Windows 下 sqlite 句柄不撒手会互相挡）
+    sync_index(ctx, status)
+}
+
 /// 检索上下文（模型懒加载常驻复用；httpd 用 Mutex 包住共享）
 pub struct SearchCtx {
     pub home: PathBuf,

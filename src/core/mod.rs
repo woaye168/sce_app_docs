@@ -11,6 +11,7 @@ pub mod indexer;
 pub mod kb;
 pub mod llm;
 pub mod mcp;
+pub mod net;
 pub mod node;
 pub mod service;
 pub mod site;
