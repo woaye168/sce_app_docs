@@ -420,6 +420,27 @@ fn ask_sse_streams_incrementally() {
     let _ = std::fs::remove_dir_all(&project);
 }
 
+/// mermaid 代码块经构建后应转成 Mermaid 组件标记（图表渲染在浏览器运行时做，SSG 产物含 graph 数据）
+#[test]
+fn mermaid_block_in_built_site() {
+    let port = 18322u16;
+    let project = make_project("mmd", "MARKER_MMD");
+    std::fs::write(
+        project.join(".bgd/doc/api_generated/diagram.md"),
+        "# 架构图\n\n```mermaid\nflowchart TD\n  Alpha --> Beta\n```\n",
+    )
+    .unwrap();
+    let (_proc, out) = spawn_serve(&project, port, &[]);
+    assert!(out.contains("OK "), "{out}");
+    let (code, body) = http_get(port, "/api/diagram.html", "localhost");
+    assert_eq!(code, 200, "{body}");
+    // 插件生效 = fence 被替换成 MermaidViewer 组件（SSG 预渲染为 mermaid-block，graph 数据在 JS payload）；
+    // 未生效则 Shiki 按代码块渲染出 language-mermaid
+    assert!(body.contains("mermaid-block"), "构建产物应含 MermaidViewer 组件：{}", &body[..body.len().min(500)]);
+    assert!(!body.contains("language-mermaid"), "fence 不应还是代码块（插件未生效）");
+    let _ = std::fs::remove_dir_all(&project);
+}
+
 #[test]
 fn mcp_streamable_http_flow() {
     let port = 18309u16;

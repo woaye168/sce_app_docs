@@ -28,6 +28,56 @@ pub struct SearchHit {
     pub score: f32,
 }
 
+impl SearchHit {
+    /// 页 URL + 章节锚点（出处链接定位到标题；空标题不拼 #）
+    pub fn url_with_anchor(&self) -> String {
+        let a = heading_anchor(&self.heading);
+        if a.is_empty() { self.url.clone() } else { format!("{}#{a}", self.url) }
+    }
+}
+
+/// 标题链 → VitePress 章节锚点。
+/// 严格对齐 @mdit-vue/shared 的 slugify（vp 页面真实 id 规则，浏览器实测比对过）：
+/// NFKD（全角→半角）→ 特殊字符一律→-（含空格/括号/点/下划线；`·` 保留）→ 折叠连续 - → 去首尾 - → 数字开头加 _ → 小写
+pub fn heading_anchor(heading: &str) -> String {
+    let last = heading.rsplit(" > ").next().unwrap_or(heading).trim();
+    let mut out = String::new();
+    let mut dash = true; // 起始视作已有 dash → 天然去首部 -
+    for c0 in last.chars() {
+        // NFKD 近似：全角 ASCII/空格转半角（重音组合符场景极罕见，不引 unicode-normalization 包）
+        let c = match c0 {
+            '\u{3000}' => ' ',
+            '\u{FF01}'..='\u{FF5E}' => char::from_u32(c0 as u32 - 0xFEE0).unwrap_or(c0),
+            _ => c0,
+        };
+        if is_vp_special(c) {
+            if !dash {
+                out.push('-');
+                dash = true;
+            }
+        } else {
+            out.extend(c.to_lowercase());
+            dash = false;
+        }
+    }
+    while out.ends_with('-') {
+        out.pop();
+    }
+    if out.starts_with(|c: char| c.is_ascii_digit()) {
+        out.insert(0, '_');
+    }
+    out
+}
+
+/// VitePress slugify 的特殊字符集（[\s~`!@#$%^&*()\-_+=[\]{}|\\;:"'""''<>,.?/] + 控制符）
+fn is_vp_special(c: char) -> bool {
+    c.is_whitespace()
+        || c.is_control()
+        || matches!(c, '~' | '`' | '!' | '@' | '#' | '$' | '%' | '^' | '&' | '*' | '(' | ')' | '-' | '_'
+            | '+' | '=' | '[' | ']' | '{' | '}' | '|' | '\\' | ';' | ':' | '"' | '\'' | '“' | '”'
+            | '‘' | '’' | '<' | '>' | ',' | '.' | '?' | '/')
+}
+
 /// 内存中的索引项（检索用）
 struct MemChunk {
     file: String,
@@ -210,6 +260,34 @@ fn cosine(a: &[f32], b: &[f32]) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 标题链 → VitePress 章节锚点（期望值均为 vp 页面真实 id，浏览器实测比对）
+    #[test]
+    fn heading_anchor_slugify() {
+        // 标题链取最后一段；全角括号 NFKD→半角→-，折叠去尾
+        assert_eq!(heading_anchor("协程 API · 双端实测结果 > 双端差异（唯一要注意的）"), "双端差异-唯一要注意的");
+        // · 保留、空格→-（vp 真实 id：协程-api-·-双端实测结果）
+        assert_eq!(heading_anchor("协程 API · 双端实测结果"), "协程-api-·-双端实测结果");
+        // 反引号/点/下划线全是特殊字符 → -
+        assert_eq!(heading_anchor("`M.p_error`"), "m-p-error");
+        // 英文小写 + 空格转连字符
+        assert_eq!(heading_anchor("Hello World"), "hello-world");
+        // 纯链式
+        assert_eq!(heading_anchor("A > B > C"), "c");
+        // 数字开头加下划线
+        assert_eq!(heading_anchor("1. 概述"), "_1-概述");
+        // 空标题 → 空锚点（调用方不拼 #）
+        assert_eq!(heading_anchor(""), "");
+    }
+
+    #[test]
+    fn hit_url_with_anchor() {
+        let h = SearchHit { file: "a/b.md".into(), heading: "协程 API".into(), text: "t".into(), url: "/a/b".into(), score: 1.0 };
+        assert_eq!(h.url_with_anchor(), "/a/b#协程-api");
+        // 无标题不拼锚点
+        let h2 = SearchHit { heading: String::new(), ..h };
+        assert_eq!(h2.url_with_anchor(), "/a/b");
+    }
 
     fn rec(file: &str, text: &str, vec: Vec<f32>) -> ChunkRecord {
         ChunkRecord {

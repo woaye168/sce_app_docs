@@ -185,6 +185,13 @@ fn route_api(req: tiny_http::Request, path: &str, full_url: &str, api: &Option<A
             let configured = !api.llm.base_url.is_empty() && !api.llm.api_key.is_empty() && !api.llm.model.is_empty();
             respond_json(req, 200, serde_json::json!({"configured": configured, "model": api.llm.model}).to_string());
         }
+        "/_api/models" => {
+            // 代理中转站 /models（设置页下拉 + 聊天面板模型切换共用）
+            match crate::core::llm::fetch_models(&api.llm) {
+                Ok(models) => respond_json(req, 200, serde_json::json!({"models": models}).to_string()),
+                Err(e) => respond_json(req, 400, serde_json::json!({"error": e}).to_string()),
+            }
+        }
         "/_api/search" => {
             let q = query_param(full_url, "q").unwrap_or_default();
             let k: usize = query_param(full_url, "k").and_then(|v| v.parse().ok()).unwrap_or(5);
@@ -265,7 +272,10 @@ fn ask_event_json(ev: &ask::AskEvent) -> String {
         ask::AskEvent::ToolCall { name, args, summary } => {
             serde_json::json!({"type": "tool_call", "name": name, "args": args, "summary": summary})
         }
-        ask::AskEvent::Sources(hits) => serde_json::json!({"type": "sources", "hits": hits}),
+        ask::AskEvent::Sources(hits) => serde_json::json!({"type": "sources", "hits": hits.iter().map(|h| {
+            // url 拼章节锚点（#标题 slug），出处链接直达小节
+            serde_json::json!({"file": h.file, "heading": h.heading, "text": h.text, "url": h.url_with_anchor(), "score": h.score})
+        }).collect::<Vec<_>>()}),
         ask::AskEvent::Done => serde_json::json!({"type": "done"}),
     };
     v.to_string()
@@ -283,13 +293,22 @@ fn route_ask(mut req: tiny_http::Request, api: &Arc<ApiState>) {
     let payload: serde_json::Value = serde_json::from_str(&body).unwrap_or(serde_json::json!({}));
     let question = payload.get("question").and_then(|v| v.as_str()).unwrap_or("").to_string();
     let history = payload.get("history").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+    // 用户当前阅读的文档路径（前端 useData relativePath，与 kb 路径一致；「解释当前文档」的上下文）
+    let page = payload.get("page").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    // 聊天面板可临时切换模型（不发则全局配置；不落盘，设置页管默认值）
+    let model_override = payload.get("model").and_then(|v| v.as_str()).unwrap_or("").to_string();
     if question.is_empty() {
         respond_json(req, 400, r#"{"error":"缺少 question"}"#.into());
         return;
     }
-    if api.llm.base_url.is_empty() || api.llm.api_key.is_empty() || api.llm.model.is_empty() {
+    if api.llm.base_url.is_empty() || api.llm.api_key.is_empty() || (api.llm.model.is_empty() && model_override.is_empty()) {
         respond_json(req, 400, r#"{"error":"LLM 未配置（AI 设置页填 base_url/api_key/model）"}"#.into());
         return;
+    }
+    // 聊天面板临时模型覆盖全局配置（不落盘）
+    let mut llm = api.llm.clone();
+    if !model_override.is_empty() {
+        llm.model = model_override;
     }
     // 拿走裸 writer 手写 SSE（CGI 式）：tiny_http 的 Response chunked 输出不 flush 会合批
     //（浏览器实测 6s 攒一个包——「卡住感」根因），必须逐帧 write + flush
@@ -297,7 +316,7 @@ fn route_ask(mut req: tiny_http::Request, api: &Arc<ApiState>) {
     let api2 = api.clone();
     std::thread::spawn(move || {
         use std::io::Write;
-        tracing::info!("ask 开始: {}", question.chars().take(80).collect::<String>());
+        tracing::info!("ask 开始: {} | page: {} | model: {}", question.chars().take(80).collect::<String>(), page, llm.model);
         if w.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream; charset=utf-8\r\nCache-Control: no-cache\r\nConnection: close\r\n\r\n").is_err() {
             return;
         }
@@ -309,7 +328,7 @@ fn route_ask(mut req: tiny_http::Request, api: &Arc<ApiState>) {
         }
         let r = {
             let mut wref = &mut w;
-            ask::ask(&api2.search, &api2.llm, &question, history, api2.max_rounds, api2.use_rerank, |ev| {
+            ask::ask(&api2.search, &llm, &question, history, api2.max_rounds, api2.use_rerank, &page, |ev| {
                 send(&mut wref, ask_event_json(&ev));
             })
         };

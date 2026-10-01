@@ -2,13 +2,53 @@
 
 /// AI 问答组件（毛玻璃风格；明暗走 VitePress CSS 变量；SSE 流式 + 思考链/工具调用折叠 + 出处链接）
 pub(crate) const AI_CHAT_VUE: &str = r##"<script setup>
-import { ref, reactive, nextTick, computed } from 'vue'
+import { ref, reactive, nextTick, computed, watch, createApp } from 'vue'
+import { useRouter, useData } from 'vitepress'
+import { MermaidViewer } from 'vitepress-plugin-mermaid-viewer/client'
 import MarkdownIt from 'markdown-it'
+
+const router = useRouter()
+const { page: vpPage } = useData() // 当前页 relativePath（与 kb 文件路径一致，「解释当前文档」上下文）
+// 出处显示加工：文件取短名（去路径去 .md）+ 标题链只留最后一段；完整路径悬停可见
+function shortFile(f) { return (f.split('/').pop() || f).replace(/\.md$/i, '') }
+function shortHeading(h) { const p = h.split(' > '); return p[p.length - 1] || h }
+// 出处链接点击：VP 对 CJK hash 的锚点滚动偶发失灵（实测 hash 不 decode → getElementById 落空），
+// 这里自己接管：SPA 导航 + 轮询等标题出现手动滚
+async function goSource(e) {
+  const a = e.target.closest('a'); if (!a) return
+  const u = new URL(a.href, location.origin)
+  if (u.origin !== location.origin) return // 外链不拦
+  e.preventDefault()
+  const target = decodeURIComponent(u.hash.slice(1))
+  // 站点 cleanUrls=false，VP 路由是 .html 风格；出处 url 是 clean 风格，导航前补扩展名
+  //（clean 路径不匹配路由会导致整页刷新，SPA 轮询上下文丢失 → 锚点滚动失败）
+  let p = u.pathname
+  if (!p.endsWith('.html') && !p.endsWith('/')) p += '.html'
+  if (p !== location.pathname) router.go(p + u.hash)
+  for (let i = 0; i < 30; i++) {
+    await new Promise(r => setTimeout(r, 150))
+    const el = target && document.getElementById(target)
+    if (el) { el.scrollIntoView({ behavior: 'smooth' }); return }
+  }
+}
 
 const md = new MarkdownIt({ linkify: true, breaks: true })
 const open = ref(false)
 const configured = ref(true)
 const modelName = ref('')
+// 模型下拉（自制液态玻璃：原生 select 弹层是 OS 控件，CSS 管不着、暗色下极丑）
+const mselOpen = ref(false)
+function pickModel(m) { chatModel.value = m; mselOpen.value = false }
+watch(mselOpen, v => {
+  if (!v) return
+  const close = () => { mselOpen.value = false; document.removeEventListener('click', close) }
+  setTimeout(() => document.addEventListener('click', close), 0) // 避开本次点击
+})
+// 可用模型列表 + 本次问答模型（localStorage 记住，不写全局配置——设置页管默认，这里管这次）
+const models = ref([])
+// localStorage 要 SSR 守卫（构建期无浏览器环境，否则 SSG 渲染报错）
+const chatModel = ref(typeof localStorage !== 'undefined' ? (localStorage.getItem('ai_chat_model') || '') : '')
+watch(chatModel, v => { try { localStorage.setItem('ai_chat_model', v) } catch {} })
 const messages = ref([])
 const input = ref('')
 const sending = ref(false)
@@ -23,10 +63,34 @@ async function toggle() {
     const r = await fetch('/_api/llm_status').then(r => r.json()).catch(() => null)
     configured.value = !!(r && r.configured)
     modelName.value = (r && r.model) || ''
+    if (!chatModel.value) chatModel.value = modelName.value
+    // 拉可用模型填下拉（失败静默，保留下拉隐藏只显示当前模型名）
+    const mr = await fetch('/_api/models').then(r => r.ok ? r.json() : null).catch(() => null)
+    if (mr && Array.isArray(mr.models) && mr.models.length) models.value = mr.models
   }
 }
 async function scrollDown() { await nextTick(); listEl.value && listEl.value.scrollTo({ top: 99999999 }) }
 function esc(s) { return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;') }
+// 气泡内 mermaid 代码块 → 手动挂载 MermaidViewer 组件（文档页同款全屏交互：点击放大/缩放/拖拽/下载；
+// 不再 inline svg 裸渲染——不可交互看不清。v-html 不编译组件，必须 createApp 手动 mount）
+async function renderMermaidIn(el) {
+  const blocks = el?.querySelectorAll('pre code.language-mermaid') || []
+  for (const b of blocks) {
+    const div = document.createElement('div')
+    div.className = 'ai-mermaid'
+    b.parentElement.replaceWith(div)
+    try {
+      createApp(MermaidViewer, { graph: encodeURIComponent(b.textContent), id: 'mq' + Math.random().toString(36).slice(2) }).mount(div)
+    } catch { /* 挂载失败移除容器 */ div.remove() }
+  }
+}
+// 代码块语法高亮（highlight.js common 集懒加载，只在有代码块时下发；mermaid 块已被换掉，跳过）
+async function highlightCodeIn(el) {
+  const blocks = el?.querySelectorAll('pre code:not(.language-mermaid):not(.hljs)') || []
+  if (!blocks.length) return
+  const hljs = (await import('highlight.js/lib/common')).default
+  blocks.forEach(b => { try { hljs.highlightElement(b) } catch { /* 未知语言保持原样 */ } })
+}
 async function send() {
   const q = input.value.trim()
   if (!q || sending.value) return
@@ -45,7 +109,7 @@ async function send() {
     const resp = await fetch('/_api/ask', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ question: q, history })
+      body: JSON.stringify({ question: q, history, page: vpPage.value?.relativePath || '', model: chatModel.value || '' })
     })
     if (!resp.ok) {
       const t = await resp.json().catch(() => ({}))
@@ -84,7 +148,9 @@ async function send() {
   clearInterval(timer)
   ai.stage = ''
   sending.value = false
-  scrollDown()
+  await scrollDown()
+  renderMermaidIn(listEl.value) // done 后把气泡里的 mermaid 代码块渲染成图
+  highlightCodeIn(listEl.value) // done 后代码块上语法高亮
 }
 </script>
 
@@ -97,7 +163,20 @@ async function send() {
     <div v-if="open" class="ai-panel">
       <div class="ai-header">
         <span>文档问答</span>
-        <span v-if="modelName" class="ai-model">{{ modelName }}</span>
+        <div v-if="models.length" class="ai-msel" title="本次问答使用的模型（默认值在 AI 设置页）">
+          <button class="ai-msel-btn" @click.stop="mselOpen = !mselOpen">
+            <span>{{ chatModel || modelName }}</span>
+            <svg :class="{ open: mselOpen }" viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>
+          </button>
+          <Transition name="pop">
+            <div v-if="mselOpen" class="ai-msel-pop">
+              <div v-for="m in models" :key="m" class="ai-msel-item" :class="{ active: m === (chatModel || modelName) }" @click.stop="pickModel(m)">
+                <span>{{ m }}</span><span v-if="m === (chatModel || modelName)" class="ai-msel-check">✓</span>
+              </div>
+            </div>
+          </Transition>
+        </div>
+        <span v-else-if="modelName" class="ai-model">{{ modelName }}</span>
       </div>
       <div v-if="!configured" class="ai-warn">LLM 未配置：请到应用「AI」设置页填 base_url / api_key / model</div>
       <div ref="listEl" class="ai-list">
@@ -112,9 +191,9 @@ async function send() {
             <span class="ai-tool-sum">{{ t.running ? '执行中…' : t.summary }}</span>
           </div>
           <div class="ai-bubble" v-html="m.html"></div>
-          <div v-if="m.sources && m.sources.length" class="ai-sources">
+          <div v-if="m.sources && m.sources.length" class="ai-sources" @click="goSource">
             <div class="ai-sources-title">参考：</div>
-            <a v-for="(s, k) in m.sources" :key="k" :href="s.url">{{ s.file }}<template v-if="s.heading"> › {{ s.heading }}</template></a>
+            <a v-for="(s, k) in m.sources" :key="k" :href="s.url" :title="s.file + (s.heading ? ' › ' + s.heading : '')">{{ shortFile(s.file) }}<template v-if="s.heading"> › {{ shortHeading(s.heading) }}</template></a>
           </div>
         </div>
         <div v-if="sending" class="ai-stage"><span class="ai-spin"></span>{{ lastStage }}<span class="ai-elapsed">{{ lastElapsed }}s</span></div>
@@ -142,12 +221,15 @@ async function send() {
   width: 420px; max-width: calc(100vw - 48px); height: 600px; max-height: calc(100vh - 120px);
   display: flex; flex-direction: column; overflow: hidden;
   border-radius: 18px;
-  background: color-mix(in srgb, var(--vp-c-bg) 72%, transparent);
-  backdrop-filter: blur(20px) saturate(180%);
-  -webkit-backdrop-filter: blur(20px) saturate(180%);
+  /* 毛玻璃：底色不透明度拉高防底下文字穿透叠加（72% 实测看不清），blur 加大 */
+  background: color-mix(in srgb, var(--vp-c-bg) 90%, transparent);
+  backdrop-filter: blur(28px) saturate(180%);
+  -webkit-backdrop-filter: blur(28px) saturate(180%);
   border: 1px solid color-mix(in srgb, var(--vp-c-divider) 60%, transparent);
   box-shadow: 0 24px 64px rgba(0, 0, 0, .18);
 }
+/* 暗色下 .18 的黑影比背景还亮会变「灰晕」——暗色阴影要更深更不透明 */
+html.dark .ai-panel { box-shadow: 0 24px 64px rgba(0, 0, 0, .55); }
 .pop-enter-active, .pop-leave-active { transition: opacity .18s, transform .18s; }
 .pop-enter-from, .pop-leave-to { opacity: 0; transform: translateY(12px) scale(.98); }
 .ai-header {
@@ -156,6 +238,40 @@ async function send() {
   border-bottom: 1px solid color-mix(in srgb, var(--vp-c-divider) 50%, transparent);
 }
 .ai-model { margin-left: auto; font-size: 12px; font-weight: 400; color: var(--vp-c-text-3); }
+/* 自制模型下拉（液态玻璃：胶囊触发器 + 毛玻璃弹层，全主题变量明暗自适应） */
+.ai-msel { position: relative; margin-left: auto; }
+.ai-msel-btn {
+  display: flex; align-items: center; gap: 5px; cursor: pointer; max-width: 200px;
+  font-size: 12px; color: var(--vp-c-text-2);
+  background: color-mix(in srgb, var(--vp-c-bg-soft) 55%, transparent);
+  backdrop-filter: blur(12px) saturate(160%);
+  -webkit-backdrop-filter: blur(12px) saturate(160%);
+  border: 1px solid color-mix(in srgb, var(--vp-c-divider) 55%, transparent);
+  border-radius: 999px; padding: 3px 10px;
+  transition: border-color .15s, color .15s;
+}
+.ai-msel-btn:hover { border-color: var(--vp-c-brand); color: var(--vp-c-text-1); }
+.ai-msel-btn > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ai-msel-btn svg { flex: none; transition: transform .18s; }
+.ai-msel-btn svg.open { transform: rotate(180deg); }
+.ai-msel-pop {
+  position: absolute; right: 0; top: calc(100% + 6px); z-index: 30;
+  min-width: 180px; max-width: 260px; max-height: 280px; overflow-y: auto; padding: 5px;
+  border-radius: 14px;
+  background: color-mix(in srgb, var(--vp-c-bg) 82%, transparent);
+  backdrop-filter: blur(24px) saturate(180%);
+  -webkit-backdrop-filter: blur(24px) saturate(180%);
+  border: 1px solid color-mix(in srgb, var(--vp-c-divider) 55%, transparent);
+  box-shadow: 0 12px 40px rgba(0, 0, 0, .18);
+}
+html.dark .ai-msel-pop { box-shadow: 0 12px 40px rgba(0, 0, 0, .55); }
+.ai-msel-item {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  padding: 6px 10px; border-radius: 9px; font-size: 12.5px; color: var(--vp-c-text-2); cursor: pointer;
+}
+.ai-msel-item:hover { background: color-mix(in srgb, var(--vp-c-brand) 14%, transparent); color: var(--vp-c-text-1); }
+.ai-msel-item.active { color: var(--vp-c-brand); font-weight: 600; }
+.ai-msel-check { flex: none; }
 .ai-warn { padding: 10px 18px; font-size: 13px; color: var(--vp-c-warning-text, #b88230); background: color-mix(in srgb, #b88230 12%, transparent); }
 .ai-list { flex: 1; overflow-y: auto; padding: 14px; display: flex; flex-direction: column; gap: 10px; }
 .ai-empty { margin: auto; color: var(--vp-c-text-3); font-size: 13px; }
@@ -171,9 +287,35 @@ async function send() {
 }
 .ai-bubble { padding: 10px 14px; font-size: 14px; line-height: 1.7; word-break: break-word; }
 .ai-bubble :deep(p) { margin: 4px 0; }
-.ai-bubble :deep(pre) { background: var(--vp-c-bg-mute, rgba(0,0,0,.06)); padding: 8px; border-radius: 8px; overflow-x: auto; font-size: 12px; }
+.ai-bubble :deep(pre) { background: var(--vp-c-bg-mute, rgba(0,0,0,.06)); padding: 8px 10px; border-radius: 8px; overflow-x: auto; font-size: 12px; margin: 6px 0; }
 .ai-bubble :deep(code) { font-family: var(--vp-font-family-mono); font-size: .9em; }
+.ai-bubble :deep(:not(pre) > code) { background: var(--vp-c-bg-mute, rgba(0,0,0,.08)); padding: 1px 5px; border-radius: 4px; }
+/* MD 全量样式：表格/引用/列表/分隔线/标题间距（无样式时用户观感=「不支持 MD」） */
+.ai-bubble :deep(table) { border-collapse: collapse; margin: 8px 0; display: block; overflow-x: auto; }
+.ai-bubble :deep(th), .ai-bubble :deep(td) { border: 1px solid var(--vp-c-divider); padding: 4px 10px; font-size: 13px; }
+.ai-bubble :deep(th) { background: var(--vp-c-bg-mute, rgba(0,0,0,.05)); font-weight: 600; }
+.ai-bubble :deep(blockquote) { margin: 6px 0; padding: 2px 12px; border-left: 3px solid var(--vp-c-brand); color: var(--vp-c-text-2); }
+.ai-bubble :deep(ul), .ai-bubble :deep(ol) { padding-left: 20px; margin: 4px 0; }
+.ai-bubble :deep(h1), .ai-bubble :deep(h2), .ai-bubble :deep(h3), .ai-bubble :deep(h4) { margin: 10px 0 4px; line-height: 1.4; }
+.ai-bubble :deep(hr) { border: none; border-top: 1px solid var(--vp-c-divider); margin: 10px 0; }
+.ai-bubble :deep(a) { color: var(--vp-c-brand); }
 .ai-bubble :deep(.err) { color: #e05555; }
+.ai-mermaid { overflow-x: auto; margin: 6px 0; }
+/* 代码高亮 token 色（自绘明暗双色，VSCode 风格近似；不引 hljs 主题 css 避免明暗切换问题） */
+.ai-bubble :deep(.hljs-keyword), .ai-bubble :deep(.hljs-literal), .ai-bubble :deep(.hljs-selector-tag) { color: #af4bcf; }
+.ai-bubble :deep(.hljs-string), .ai-bubble :deep(.hljs-regexp) { color: #2e7d32; }
+.ai-bubble :deep(.hljs-comment), .ai-bubble :deep(.hljs-quote) { color: #8a919e; font-style: italic; }
+.ai-bubble :deep(.hljs-number), .ai-bubble :deep(.hljs-symbol) { color: #b86e28; }
+.ai-bubble :deep(.hljs-title), .ai-bubble :deep(.hljs-name), .ai-bubble :deep(.hljs-title.function_) { color: #1f6fd6; }
+.ai-bubble :deep(.hljs-attr), .ai-bubble :deep(.hljs-attribute), .ai-bubble :deep(.hljs-variable), .ai-bubble :deep(.hljs-template-variable) { color: #b25086; }
+.ai-bubble :deep(.hljs-type), .ai-bubble :deep(.hljs-built_in), .ai-bubble :deep(.hljs-title.class_) { color: #0f7b6c; }
+html.dark .ai-bubble :deep(.hljs-keyword), html.dark .ai-bubble :deep(.hljs-literal), html.dark .ai-bubble :deep(.hljs-selector-tag) { color: #c586c0; }
+html.dark .ai-bubble :deep(.hljs-string), html.dark .ai-bubble :deep(.hljs-regexp) { color: #7ec98a; }
+html.dark .ai-bubble :deep(.hljs-comment), html.dark .ai-bubble :deep(.hljs-quote) { color: #7f8b98; }
+html.dark .ai-bubble :deep(.hljs-number), html.dark .ai-bubble :deep(.hljs-symbol) { color: #d9a05b; }
+html.dark .ai-bubble :deep(.hljs-title), html.dark .ai-bubble :deep(.hljs-name), html.dark .ai-bubble :deep(.hljs-title.function_) { color: #6cb3ff; }
+html.dark .ai-bubble :deep(.hljs-attr), html.dark .ai-bubble :deep(.hljs-attribute), html.dark .ai-bubble :deep(.hljs-variable), html.dark .ai-bubble :deep(.hljs-template-variable) { color: #d18bb2; }
+html.dark .ai-bubble :deep(.hljs-type), html.dark .ai-bubble :deep(.hljs-built_in), html.dark .ai-bubble :deep(.hljs-title.class_) { color: #4ec9b0; }
 .ai-think { margin-bottom: 6px; font-size: 12px; color: var(--vp-c-text-3); }
 .ai-think summary { cursor: pointer; user-select: none; }
 .ai-think > div { padding: 6px 10px; border-left: 2px solid var(--vp-c-divider); margin-top: 4px; opacity: .85; }
@@ -185,9 +327,10 @@ async function send() {
 .ai-elapsed { margin-left: auto; color: var(--vp-c-text-3); font-variant-numeric: tabular-nums; }
 .ai-spin { width: 12px; height: 12px; border-radius: 50%; border: 2px solid var(--vp-c-divider); border-top-color: var(--vp-c-brand); animation: ai-spin 0.8s linear infinite; flex: none; }
 @keyframes ai-spin { to { transform: rotate(360deg); } }
-.ai-sources { margin-top: 6px; font-size: 12px; display: flex; flex-wrap: wrap; gap: 4px 10px; }
+/* 出处一行一个（原先 flex-wrap 横排，多条时挤成一团读不清） */
+.ai-sources { margin-top: 6px; font-size: 12px; display: flex; flex-direction: column; gap: 3px; }
 .ai-sources-title { color: var(--vp-c-text-3); }
-.ai-sources a { color: var(--vp-c-brand); text-decoration: none; }
+.ai-sources a { color: var(--vp-c-brand); text-decoration: none; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ai-sources a:hover { text-decoration: underline; }
 .ai-input { display: flex; gap: 8px; padding: 12px; border-top: 1px solid color-mix(in srgb, var(--vp-c-divider) 50%, transparent); }
 .ai-input textarea {

@@ -93,6 +93,8 @@ struct App {
     /// AI 连通测试结果（后台线程回填）
     ai_test_rx: Option<std::sync::mpsc::Receiver<String>>,
     ai_test_result: String,
+    ai_models: Vec<String>,
+    ai_models_rx: Option<std::sync::mpsc::Receiver<Result<Vec<String>, String>>>,
 }
 
 impl Default for App {
@@ -108,6 +110,8 @@ impl Default for App {
             project_cfg: core::config::ProjectConfig::default(),
             ai_test_rx: None,
             ai_test_result: String::new(),
+            ai_models: Vec::new(),
+            ai_models_rx: None,
         }
     }
 }

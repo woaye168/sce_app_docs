@@ -20,14 +20,29 @@ fn is_vitepress_v2(home: &Path) -> bool {
     content.contains("\"version\": \"2.")
 }
 
+/// 全局依赖清单（package.json 内容）。
+/// mermaid viewer 插件走自有 fork 的 git 依赖并锁 commit（插件太新，不等上游；fork 已提交 dist 免构建，
+/// 库本体上游已是动态 import 懒加载，无需自改）。
+const DEPS_PACKAGE_JSON: &str = r#"{"name":"bgd-docs-vitepress","private":true,"type":"module","devDependencies":{"vitepress":"^2.0.0-alpha.20","markdown-it":"^14","mermaid":"^11","highlight.js":"^11","vitepress-plugin-mermaid-viewer":"github:woaye168/vitepress-plugin-mermaid-viewer#e47959bb3e5a4566580cb04010ad5aaf081eb423"}}"#;
+
+/// mermaid-viewer 插件锁定的 commit（git 依赖不会自动重装——sha 变化必须靠版本戳触发，戳见 ensure_deps）
+const PLUGIN_SHA: &str = "e47959bb3e5a4566580cb04010ad5aaf081eb423";
+
 /// 确保全局依赖（VitePress 2.x alpha，内置 minisearch 本地搜索）。
 /// package.json 每次重写（依赖清单变化要生效），node_modules 缺包才跑 install。
 pub fn ensure_deps(home: &Path, node: &Path) -> Result<(), String> {
     std::fs::create_dir_all(home).map_err(|e| format!("创建 vitepress_home 失败: {e}"))?;
     let pkg = home.join("package.json");
-    let _ = std::fs::write(&pkg, r#"{"name":"bgd-docs-vitepress","private":true,"type":"module","devDependencies":{"vitepress":"^2.0.0-alpha.20","markdown-it":"^14"}}"#);
+    let _ = std::fs::write(&pkg, DEPS_PACKAGE_JSON);
+    // 插件版本戳：git 依赖锁 commit，目录还在但 sha 变了 npm 不会主动换——戳不一致强制重装
+    let stamp = home.join("node_modules/.mermaid_viewer_sha");
+    let stamp_ok = std::fs::read_to_string(&stamp).map(|s| s.trim() == PLUGIN_SHA).unwrap_or(false);
     let need_install = !home.join("node_modules/vitepress").is_dir()
         || !home.join("node_modules/markdown-it").is_dir()
+        || !home.join("node_modules/mermaid").is_dir()
+        || !home.join("node_modules/highlight.js").is_dir()
+        || !home.join("node_modules/vitepress-plugin-mermaid-viewer").is_dir()
+        || !stamp_ok
         || !is_vitepress_v2(home);
     if !need_install {
         return Ok(());
@@ -38,7 +53,10 @@ pub fn ensure_deps(home: &Path, node: &Path) -> Result<(), String> {
     #[cfg(windows)]
     cmd.creation_flags(CREATE_NO_WINDOW);
     match cmd.output() {
-        Ok(o) if o.status.success() => Ok(()),
+        Ok(o) if o.status.success() => {
+            let _ = std::fs::write(&stamp, PLUGIN_SHA);
+            Ok(())
+        }
         Ok(o) => Err(format!("VitePress 依赖安装失败: {}", String::from_utf8_lossy(&o.stderr))),
         Err(e) => Err(format!("npm install 启动失败: {e}")),
     }
@@ -153,6 +171,14 @@ fn read_log_tail(path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 依赖清单必须含 mermaid 支持（viewer 版 fork 锁 commit，不追上游）
+    #[test]
+    fn deps_include_mermaid() {
+        assert!(DEPS_PACKAGE_JSON.contains("\"mermaid\":"), "缺 mermaid 依赖");
+        assert!(DEPS_PACKAGE_JSON.contains("github:woaye168/vitepress-plugin-mermaid-viewer#"), "插件必须走 viewer fork git 依赖并锁 commit");
+        assert!(DEPS_PACKAGE_JSON.contains("\"highlight.js\":"), "缺 highlight.js 依赖（气泡代码高亮）");
+    }
 
     #[test]
     fn build_fails_without_vitepress() {

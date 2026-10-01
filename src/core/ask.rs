@@ -89,7 +89,11 @@ pub fn exec_tool(
             // 去重（同文件同标题只留一个）
             let mut seen = std::collections::HashSet::new();
             sources.retain(|h| seen.insert((h.file.clone(), h.heading.clone())));
-            serde_json::to_string(&hits).map_err(|e| e.to_string())
+            // url 拼章节锚点（MCP 调用方/人可直接跳转小节）
+            let hits_json: Vec<serde_json::Value> = hits.iter().map(|h| {
+                serde_json::json!({"file": h.file, "heading": h.heading, "text": h.text, "url": h.url_with_anchor(), "score": h.score})
+            }).collect();
+            serde_json::to_string(&hits_json).map_err(|e| e.to_string())
         }
         "get_doc" => {
             let path = args_v.get("path").and_then(|v| v.as_str()).unwrap_or("");
@@ -112,12 +116,25 @@ const SYSTEM_PROMPT: &str = "你是项目文档助手。回答用户关于本项
 规则：\n\
 1. 优先用 search_docs 检索文档库，不要凭印象编造；必要时用 get_doc 深读全文。\n\
 2. 检索结果不足可以换关键词再查（允许调用多轮工具）。\n\
-3. 回答用中文，基于检索到的内容，末尾列出参考的文档路径。\n\
-4. 文档库里没有的内容，明确说「文档库未覆盖」。";
+3. 回答用中文，基于检索到的内容。**不要在回答末尾列参考文档——参考由系统自动附带，你列了就是重复**。\n\
+4. 文档库里没有的内容，明确说「文档库未覆盖」。\n\
+输出格式（前端会实时渲染，务必遵守）：\n\
+- 需要画图（流程/架构/时序/关系说明）时，一律用 ```mermaid 代码块输出 mermaid 源码，不要画 ASCII 图；\n\
+  mermaid 源码里禁止写硬编码颜色（fill/stroke 色值），要强调就交给主题配色，否则暗色主题下会看不清。\n\
+- 给出代码时，一律用带语言标记的代码块（如 ```lua、```rust、```sql），不要用行内代码写多行代码。";
+
+/// 组装 system prompt：page 非空时追加「当前文档」上下文（前端传用户正在阅读的页面相对路径，
+/// 与 kb 文件路径一致，LLM 可用 get_doc 直接读全文）
+fn build_system_prompt(page: &str) -> String {
+    if page.is_empty() {
+        return SYSTEM_PROMPT.to_string();
+    }
+    format!("{SYSTEM_PROMPT}\n5. 用户当前正在阅读文档：{page}。用户说「当前文档/这篇文档/本文」时指这篇，优先用 get_doc 读取其全文。")
+}
 
 /// 多轮问答主循环。ctx 为共享检索上下文（锁只在工具执行瞬间持有）。
 /// history 为 OpenAI 消息格式的会话历史（user/assistant 交替）。
-/// max_rounds = 最大工具调用轮数（界面可配）。
+/// max_rounds = 最大工具调用轮数（界面可配）。page = 用户当前阅读的文档路径（可为空）。
 pub fn ask(
     ctx: &Mutex<SearchCtx>,
     cfg: &LlmConfig,
@@ -125,9 +142,10 @@ pub fn ask(
     history: Vec<serde_json::Value>,
     max_rounds: usize,
     use_rerank: bool,
+    page: &str,
     mut on_event: impl FnMut(AskEvent),
 ) -> Result<(), String> {
-    let mut messages = vec![serde_json::json!({"role": "system", "content": SYSTEM_PROMPT})];
+    let mut messages = vec![serde_json::json!({"role": "system", "content": build_system_prompt(page)})];
     messages.extend(history);
     messages.push(serde_json::json!({"role": "user", "content": question}));
 
@@ -202,6 +220,25 @@ mod tests {
         (home, site)
     }
 
+    /// system prompt 必须引导输出格式：画图用 mermaid（前端会渲染）、代码用带语言的 fence（前端高亮）、
+    /// 正文不列参考（参考由系统附带）、mermaid 禁硬编码颜色（主题自适应）
+    #[test]
+    fn system_prompt_guides_output_format() {
+        assert!(SYSTEM_PROMPT.contains("mermaid"), "应引导 mermaid 画图：{SYSTEM_PROMPT}");
+        assert!(SYSTEM_PROMPT.contains("```"), "应引导代码 fence：{SYSTEM_PROMPT}");
+        assert!(SYSTEM_PROMPT.contains("参考由系统"), "应禁止正文列参考：{SYSTEM_PROMPT}");
+        assert!(SYSTEM_PROMPT.contains("硬编码颜色"), "应禁止 mermaid 硬编码颜色：{SYSTEM_PROMPT}");
+    }
+
+    /// 当前文档上下文：传了页面路径 → system prompt 带上并点名「当前文档」；空 → 原 prompt
+    #[test]
+    fn system_prompt_includes_current_page() {
+        let p = build_system_prompt("research/messege/持久化方案认知对齐.md");
+        assert!(p.contains("research/messege/持久化方案认知对齐.md"), "应带页面路径：{p}");
+        assert!(p.contains("当前文档"), "应点名「当前文档」指代：{p}");
+        assert_eq!(build_system_prompt(""), SYSTEM_PROMPT, "无上下文应原样");
+    }
+
     #[test]
     fn exec_get_doc_and_list_sources() {
         let (home, site) = setup_kb("tools");
@@ -257,7 +294,7 @@ mod tests {
         let mut arrivals: Vec<u128> = Vec::new();
         let (home, site) = setup_kb("stream");
         let ctx = Mutex::new(SearchCtx::new(home.clone(), site.clone()));
-        ask(&ctx, &cfg, "hi", vec![], 5, false, |ev| {
+        ask(&ctx, &cfg, "hi", vec![], 5, false, "", |ev| {
             if matches!(ev, AskEvent::Delta(_)) {
                 arrivals.push(t0.elapsed().as_millis());
             }
@@ -310,7 +347,7 @@ mod tests {
             model: "test".into(),
         };
         let mut events: Vec<String> = Vec::new();
-        ask(&ctx, &cfg, "查询接口在哪", vec![], 5, false, |ev| {
+        ask(&ctx, &cfg, "查询接口在哪", vec![], 5, false, "a/b.md", |ev| {
             events.push(format!("{ev:?}"));
         }).unwrap();
         let rounds = handle.join().unwrap();

@@ -59,6 +59,16 @@ doc/research/          # 设计文档（架构重构方案等）
 
 **CLI 确定性**：serve 的 lan/白名单只看命令行参数，不继承 GUI 持久化配置（防脏配置污染自测）。
 
+## 架构要点（v0.3.1 mermaid，2026-10-01）
+
+**mermaid 图表**：mermaid 代码块 → 图表，插件用自有 fork [woaye168/vitepress-plugin-mermaid-viewer](https://github.com/woaye168/vitepress-plugin-mermaid-viewer)（git 依赖锁 commit，builder.rs `DEPS_PACKAGE_JSON`；fork 改动：vp2 peer 适配 + 提交 dist 免构建；懒加载上游自带）。**选 viewer 版的原因**：点击图表开全屏 viewer（滚轮缩放/拖拽平移/下载 PNG/SVG/复制源码），大图可读性刚需；且它不要 withMermaid 包裹、三件套自注册（config 里 mermaidMarkdown+mermaidPlugin、主题 enhanceMermaid+client.css），无 vp 版本敏感 hack。暗色由组件自适配；问答气泡里的 mermaid 块在回答完成时渲染（AiChat.vue `renderMermaidIn`，inline svg 不走 viewer）。
+
+**「当前文档」上下文**：AiChat 发问时带 `page`（useData page relativePath，与 kb 文件路径一致）→ ask.rs `build_system_prompt` 追加规则点名「当前文档」指代，LLM 直接 get_doc 读全文。**坑：useData 解构出的是 ref，script 里必须 `.value`**（漏写静默 undefined → 空 page，不报错）。
+
+**输出格式与体验（v0.3.1 追加）**：system prompt 管输出形态——画图一律 mermaid（禁 ASCII/禁硬编码色）、代码带语言 fence、**正文不列参考**（参考由系统 Sources 帧附带）。气泡：mermaid 块 done 后 createApp 手动挂载 MermaidViewer（v-html 不编译组件；全屏交互与文档页一致）、highlight.js lib/common 懒加载高亮（token 色自绘明暗双色）、出处显示短名+末节（全路径悬停）、暗色阴影加深（.18 黑影在深底上变灰晕）。**mermaid 语义强调色**：文档写 `fill:mmdaccent,stroke:mmdaccentline` 占位符，fork render 按主题替换真实色（`var()`/引号被 mermaid parser 拒绝——实测；占位符必须裸字母 token）。**模型切换**：`/_api/models` 代理中转站 /models；设置页「获取可用模型」下拉存默认；聊天面板自制液态玻璃下拉（原生 select 弹层是 OS 控件不可 CSS、暗色极丑）临时切换（发问带 model 参数覆盖、localStorage 记忆、不落盘；**localStorage 必须 SSR 守卫**）。**git 依赖版本戳**：node_modules/.mermaid_viewer_sha，sha 变化强制重装（npm 对同 url git 依赖不主动更新）。
+
+**出处锚点**：检索命中的 url 拼 `#标题锚点`（kb.rs `heading_anchor`，**严格对齐 @mdit-vue/shared slugify**：NFKD→特殊字符→`-`→折叠→去首尾→数字开头加`_`→小写，`·`保留——和 GitHub slugger 不同，实测比对过）；AiChat 出处点击自接管（goSource）：站点 cleanUrls=false 路由是 .html 风格，clean 路径不匹配会整页刷新丢 SPA 上下文导致锚点滚动失败。
+
 ## 使用方约定（改代码前必读）
 
 - 应用只需实现 `ShellApp` 并调 `bgd_appsdk::app::run`——公共逻辑（CLI 分发、单实例、看守线程、项目解析、窗口壳）全托管，禁止自己再写一套。

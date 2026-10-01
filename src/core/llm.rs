@@ -21,6 +21,31 @@ pub struct ToolCall {
     pub args: String,
 }
 
+/// 拉取可用模型列表（GET {base_url}/models，OpenAI 标准端点）。
+/// 设置页「获取可用模型」下拉与聊天面板模型切换共用。未配置报错。
+pub fn fetch_models(cfg: &LlmConfig) -> Result<Vec<String>, String> {
+    if cfg.base_url.is_empty() || cfg.api_key.is_empty() {
+        return Err("LLM 未配置（先填 base_url / api_key）".into());
+    }
+    let url = format!("{}/models", cfg.base_url.trim_end_matches('/'));
+    let resp = reqwest::blocking::Client::new()
+        .get(&url)
+        .header("Authorization", format!("Bearer {}", cfg.api_key))
+        .timeout(std::time::Duration::from_secs(15))
+        .send()
+        .map_err(|e| format!("请求模型列表失败: {e}"))?;
+    if !resp.status().is_success() {
+        return Err(format!("模型列表接口返回 {}", resp.status()));
+    }
+    let v: serde_json::Value = resp.json().map_err(|e| format!("模型列表解析失败: {e}"))?;
+    let mut models: Vec<String> = v.get("data")
+        .and_then(|d| d.as_array())
+        .map(|arr| arr.iter().filter_map(|m| m.get("id").and_then(|i| i.as_str()).map(String::from)).collect())
+        .unwrap_or_default();
+    models.sort();
+    Ok(models)
+}
+
 /// 流式事件
 #[derive(Debug, Clone, PartialEq)]
 pub enum StreamEvent {
@@ -177,6 +202,31 @@ pub fn chat_stream(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// /models 拉取：OpenAI 格式 data[].id 解析
+    #[test]
+    fn fetch_models_lists_ids() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tiny_http::Server::from_listener(listener, None).unwrap();
+        let h = std::thread::spawn(move || {
+            while let Ok(Some(req)) = server.recv_timeout(std::time::Duration::from_secs(10)) {
+                let _ = req.respond(tiny_http::Response::from_string(r#"{"data":[{"id":"kimi-k3"},{"id":"deepseek-v4"}]}"#));
+                return;
+            }
+        });
+        let cfg = LlmConfig { base_url: format!("http://127.0.0.1:{port}"), api_key: "t".into(), model: "t".into() };
+        let models = fetch_models(&cfg).unwrap();
+        assert_eq!(models, vec!["deepseek-v4".to_string(), "kimi-k3".to_string()], "返回排序后的 id 列表");
+        h.join().unwrap();
+    }
+
+    /// /models 未配置报错
+    #[test]
+    fn fetch_models_requires_config() {
+        let cfg = LlmConfig { base_url: String::new(), api_key: String::new(), model: String::new() };
+        assert!(fetch_models(&cfg).is_err());
+    }
 
     #[test]
     fn parses_content_and_reasoning() {

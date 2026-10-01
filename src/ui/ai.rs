@@ -21,7 +21,50 @@ impl App {
         ui.horizontal(|ui| {
             ui.label("model：");
             ui.text_edit_singleline(&mut self.global_cfg.llm_model);
+            if ui.button("获取可用模型").clicked() {
+                let cfg = llm::LlmConfig {
+                    base_url: self.global_cfg.llm_base_url.clone(),
+                    api_key: self.global_cfg.llm_api_key.clone(),
+                    model: String::new(),
+                };
+                let (tx, rx) = std::sync::mpsc::channel();
+                self.ai_models_rx = Some(rx);
+                std::thread::spawn(move || {
+                    let _ = tx.send(llm::fetch_models(&cfg));
+                });
+            }
         });
+        // 收模型列表结果；有列表时给下拉（选中即写入 model，免手敲）
+        if let Some(rx) = &self.ai_models_rx {
+            if let Ok(r) = rx.try_recv() {
+                match r {
+                    Ok(list) => {
+                        self.status = format!("拉到 {} 个可用模型", list.len());
+                        self.ai_models = list;
+                    }
+                    Err(e) => self.status = format!("获取模型失败：{e}"),
+                }
+                self.ai_models_rx = None;
+            }
+        }
+        if !self.ai_models.is_empty() {
+            ui.horizontal(|ui| {
+                ui.label("下拉选择：");
+                let mut cur = self.global_cfg.llm_model.clone();
+                egui::ComboBox::from_id_salt("llm_model_pick")
+                    .selected_text(if cur.is_empty() { "（选择模型）".to_string() } else { cur.clone() })
+                    .show_ui(ui, |ui| {
+                        for m in &self.ai_models {
+                            ui.selectable_value(&mut cur, m.clone(), m);
+                        }
+                    });
+                if cur != self.global_cfg.llm_model {
+                    self.global_cfg.llm_model = cur;
+                    config::write_global(&self.global_cfg);
+                    self.status = format!("已选模型：{}", self.global_cfg.llm_model);
+                }
+            });
+        }
         ui.horizontal(|ui| {
             ui.label("最大工具调用轮数：");
             ui.add(egui::DragValue::new(&mut self.global_cfg.max_tool_rounds).range(1..=20));

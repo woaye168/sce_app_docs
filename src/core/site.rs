@@ -268,8 +268,10 @@ pub fn write_site_config(
         format!("    search: {{ provider: '{}' }},\n", tpl.search_provider)
     };
     // ignoreDeadLinks：文档聚合场景死链是常态（md 互链 .lua/相对路径等），构建不能因此被拦
+    // mermaid viewer：```mermaid 代码块 → MermaidViewer 组件（点击开全屏 viewer：缩放/拖拽/下载）；
+    // 三件套自注册（插件明确不要 withMermaid 包裹；fork 锁 commit；暗色组件自适配）
     let cfg_text = format!(
-        "import {{ defineConfig }} from 'vitepress'\n\nexport default defineConfig({{\n  title: '{title}',\n  description: '{description}',\n  lang: '{lang}',\n  lastUpdated: {last_updated},\n  cleanUrls: {clean_urls},\n  ignoreDeadLinks: true,\n  rewrites: {{\n{rewrites}\n  }},\n  themeConfig: {{\n{search_block}    sidebar: [\n{sidebar_items}\n    ],\n  }},\n  vite: {{\n    resolve: {{ preserveSymlinks: {preserve_symlinks} }},\n  }},\n}})\n",
+        "import {{ defineConfig }} from 'vitepress'\nimport {{ mermaidMarkdown, mermaidPlugin }} from 'vitepress-plugin-mermaid-viewer'\n\nexport default defineConfig({{\n  title: '{title}',\n  description: '{description}',\n  lang: '{lang}',\n  lastUpdated: {last_updated},\n  cleanUrls: {clean_urls},\n  ignoreDeadLinks: true,\n  rewrites: {{\n{rewrites}\n  }},\n  markdown: {{\n    config(md) {{ mermaidMarkdown(md) }},\n  }},\n  themeConfig: {{\n{search_block}    sidebar: [\n{sidebar_items}\n    ],\n  }},\n  vite: {{\n    plugins: [mermaidPlugin()],\n    resolve: {{ preserveSymlinks: {preserve_symlinks} }},\n  }},\n}})\n",
         title = project_name,
         description = tpl.description,
         lang = tpl.lang,
@@ -285,8 +287,10 @@ pub fn write_site_config(
     // Layout 槽位挂 AI 问答组件（layout-bottom 浮动面板）
     let theme_dir = cfg.join("theme");
     std::fs::create_dir_all(&theme_dir)?;
+    // enhanceMermaid 注册 MermaidViewer 组件（viewer 插件官方注册方式，无版本敏感 hack）；
+    // 组件内部动态 import mermaid 库，不拖累首开
     std::fs::write(theme_dir.join("index.js"),
-        "import DefaultTheme from 'vitepress/theme'\nimport { h } from 'vue'\nimport AiChat from './AiChat.vue'\nimport './custom.css'\nexport default {\n  extends: DefaultTheme,\n  Layout: () => h(DefaultTheme.Layout, null, { 'layout-bottom': () => h(AiChat) })\n}\n")?;
+        "import DefaultTheme from 'vitepress/theme'\nimport { h } from 'vue'\nimport AiChat from './AiChat.vue'\nimport { enhanceMermaid } from 'vitepress-plugin-mermaid-viewer/client'\nimport 'vitepress-plugin-mermaid-viewer/client.css'\nimport './custom.css'\nexport default {\n  extends: DefaultTheme,\n  Layout: () => h(DefaultTheme.Layout, null, { 'layout-bottom': () => h(AiChat) }),\n  enhanceApp({ app }) { enhanceMermaid(app) }\n}\n")?;
     std::fs::write(theme_dir.join("custom.css"),
         "/* 结构图：无背景色，目录/连接线颜色跟随明暗主题 */\n.ftree {\n  font-family: var(--vp-font-family-mono);\n  font-size: 13px;\n  line-height: 1.6;\n  padding: 0;\n  margin: 0;\n  overflow-x: auto;\n  background: transparent;\n}\n.ft-dir { color: var(--vp-c-text-1); font-weight: bold; }\n.ft-line { color: var(--vp-c-text-3); }\n")?;
     std::fs::write(theme_dir.join("AiChat.vue"), crate::core::site_templates::AI_CHAT_VUE)?;
@@ -481,6 +485,24 @@ mod tests {
         assert!(dir.join("api").exists()); // junction 到 api_generated
         assert!(dir.join(".project_root").is_file());
         assert!(dir.file_name().unwrap().to_string_lossy().ends_with("-docs"));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// mermaid 接入（viewer 版）：config 自注册 markdown helper + vite 插件；主题 enhanceMermaid 注册组件
+    ///（viewer 插件明确不用 withMermaid 包裹，三件套自管，无版本敏感 hack）
+    #[test]
+    fn site_config_has_mermaid() {
+        let tmp = setup_project("mmd");
+        let home = std::env::temp_dir().join(format!("bgd_docs_home_mmd_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        let sources = effective_sources(&tmp, &GlobalConfig::default(), &ProjectConfig::default());
+        let dir = write_site_config(&home, &tmp, &sources).unwrap();
+        let cfg = std::fs::read_to_string(dir.join(".vitepress/config.mjs")).unwrap();
+        assert!(cfg.contains("mermaidMarkdown"), "config 必须注册 markdown helper：{cfg}");
+        assert!(cfg.contains("mermaidPlugin"), "config 必须注册 vite 插件：{cfg}");
+        let theme = std::fs::read_to_string(dir.join(".vitepress/theme/index.js")).unwrap();
+        assert!(theme.contains("enhanceMermaid"), "主题必须注册 Mermaid 组件：{theme}");
         let _ = std::fs::remove_dir_all(&tmp);
         let _ = std::fs::remove_dir_all(&home);
     }
