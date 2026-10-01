@@ -381,8 +381,9 @@ async function send() {
   border: 1px solid color-mix(in srgb, var(--vp-c-divider) 60%, transparent);
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, .35), 0 24px 64px rgba(0, 0, 0, .18);
 }
-/* 暗色下 .18 的黑影比背景还亮会变「灰晕」——暗色阴影要更深更不透明，高光也压暗 */
-html.dark .ai-panel { box-shadow: inset 0 1px 0 rgba(255, 255, 255, .08), 0 24px 64px rgba(0, 0, 0, .55); }
+/* 暗色对策（用户目测定稿）：E 方案=inset 顶边高光 + 白光晕，再暗 30%（alpha .22→.15/14px）。
+   色带讨论存档：白晕台阶密度 alpha×255/blur；参数观感因人而异，以实测为准 */
+html.dark .ai-panel { box-shadow: inset 0 1px 0 rgba(255, 255, 255, .08), 0 0 14px rgba(225, 230, 255, .15); }
 /* 尺寸档：tall 放大（高度拉满，宽度不变）；full 全屏（宽高拉满，留 16px 呼吸边） */
 .ai-panel.tall { top: 16px; bottom: 84px; height: auto; max-height: none; }
 .ai-panel.full { inset: 16px; width: auto; height: auto; max-width: none; max-height: none; }
@@ -426,7 +427,7 @@ html.dark .ai-panel { box-shadow: inset 0 1px 0 rgba(255, 255, 255, .08), 0 24px
   border: 1px solid color-mix(in srgb, var(--vp-c-divider) 55%, transparent);
   box-shadow: 0 12px 40px rgba(0, 0, 0, .18);
 }
-html.dark .ai-dock-pop { box-shadow: 0 12px 40px rgba(0, 0, 0, .55); }
+html.dark .ai-dock-pop { box-shadow: 0 0 10px rgba(225, 230, 255, .13); }
 .ai-dock-item {
   display: flex; align-items: center; gap: 8px; padding: 6px 10px; border-radius: 9px;
   font-size: 12.5px; color: var(--vp-c-text-2); cursor: pointer;
@@ -466,7 +467,7 @@ html.dark .ai-dock-pop { box-shadow: 0 12px 40px rgba(0, 0, 0, .55); }
 .ai-msel-btn svg { flex: none; transition: transform .18s; }
 .ai-msel-btn svg.open { transform: rotate(180deg); }
 .ai-msel-pop {
-  position: absolute; right: 0; top: calc(100% + 6px); z-index: 30;
+  position: absolute; left: 0; top: calc(100% + 6px); z-index: 30;
   min-width: 180px; max-width: 260px; max-height: 280px; overflow-y: auto; padding: 5px;
   border-radius: 14px;
   background: color-mix(in srgb, var(--vp-c-bg) 68%, transparent);
@@ -474,7 +475,7 @@ html.dark .ai-dock-pop { box-shadow: 0 12px 40px rgba(0, 0, 0, .55); }
   border: 1px solid color-mix(in srgb, var(--vp-c-divider) 55%, transparent);
   box-shadow: 0 12px 40px rgba(0, 0, 0, .18);
 }
-html.dark .ai-msel-pop { box-shadow: 0 12px 40px rgba(0, 0, 0, .55); }
+html.dark .ai-msel-pop { box-shadow: 0 0 10px rgba(225, 230, 255, .13); }
 .ai-msel-item {
   display: flex; align-items: center; justify-content: space-between; gap: 8px;
   padding: 6px 10px; border-radius: 9px; font-size: 12.5px; color: var(--vp-c-text-2); cursor: pointer;
@@ -569,7 +570,9 @@ html.dark .ai-bubble :deep(.hljs-type), html.dark .ai-bubble :deep(.hljs-built_i
 .ai-send {
   border: none; border-radius: 10px; padding: 0 16px; cursor: pointer;
   color: #fff; background: linear-gradient(135deg, #5b8cff, #a06bff); font-size: 14px;
+  transition: filter .15s;
 }
+.ai-send:hover:not(:disabled) { filter: brightness(1.12); }
 .ai-send:disabled { opacity: .5; cursor: default; }
 /* 停止按钮：与发送同款的文字按钮，红色渐变 */
 .ai-stop { background: linear-gradient(135deg, #ff7a5c, #e8405f); }
@@ -586,9 +589,12 @@ html.dark .ai-bubble :deep(.hljs-type), html.dark .ai-bubble :deep(.hljs-built_i
   border: 1px solid color-mix(in srgb, var(--vp-c-divider) 60%, transparent);
   box-shadow: 0 16px 48px rgba(0, 0, 0, .25);
 }
+html.dark .ai-confirm { box-shadow: 0 0 12px rgba(225, 230, 255, .14); }
 .ai-confirm-text { font-size: 13.5px; color: var(--vp-c-text-1); line-height: 1.6; }
 .ai-confirm-btns { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px; }
-.ai-confirm-btns button { border: none; border-radius: 8px; padding: 5px 16px; font-size: 13px; cursor: pointer; }
+.ai-confirm-btns button { border: none; border-radius: 8px; padding: 5px 16px; font-size: 13px; cursor: pointer; transition: filter .15s, background .15s; }
 .ai-confirm-cancel { background: color-mix(in srgb, var(--vp-c-text-3) 14%, transparent); color: var(--vp-c-text-2); }
+.ai-confirm-cancel:hover { background: color-mix(in srgb, var(--vp-c-text-3) 24%, transparent); color: var(--vp-c-text-1); }
 .ai-confirm-ok { background: linear-gradient(135deg, #5b8cff, #a06bff); color: #fff; }
+.ai-confirm-ok:hover { filter: brightness(1.12); }
 </style>
