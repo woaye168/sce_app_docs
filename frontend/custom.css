@@ -10,3 +10,17 @@
 }
 .ft-dir { color: var(--vp-c-text-1); font-weight: bold; }
 .ft-line { color: var(--vp-c-text-3); }
+
+/* ===== 全局细滚动条（整站 + AI 面板通用）：默认隐形，悬停滚动区或滚动中浮现 =====
+   「滚动中浮现」靠 theme_index.js 的滚动监听给 html 打 .scrolling 类（scroll 不冒泡，用 capture） */
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: transparent; border-radius: 4px; }
+::-webkit-scrollbar-corner { background: transparent; }
+*:hover::-webkit-scrollbar-thumb,
+html.scrolling ::-webkit-scrollbar-thumb {
+  background: color-mix(in srgb, var(--vp-c-text-3) 35%, transparent);
+}
+::-webkit-scrollbar-thumb:hover {
+  background: color-mix(in srgb, var(--vp-c-text-3) 60%, transparent);
+}

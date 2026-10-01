@@ -11,5 +11,17 @@ import './custom.css'
 export default {
   extends: DefaultTheme,
   Layout: () => h(DefaultTheme.Layout, null, { 'layout-bottom': () => h(AiChat) }),
-  enhanceApp({ app }) { enhanceMermaid(app) }
+  enhanceApp({ app }) {
+    enhanceMermaid(app)
+    // 滚动时给 html 打 .scrolling 类（滚动条只在滚动中/悬停时浮现；scroll 不冒泡必须 capture）
+    // SSR 守卫：构建期无 window
+    if (typeof window !== 'undefined') {
+      let timer = 0
+      window.addEventListener('scroll', () => {
+        document.documentElement.classList.add('scrolling')
+        clearTimeout(timer)
+        timer = setTimeout(() => document.documentElement.classList.remove('scrolling'), 800)
+      }, { capture: true, passive: true })
+    }
+  }
 }

@@ -92,6 +92,16 @@ async function toggle() {
 }
 async function scrollDown() { await nextTick(); listEl.value && listEl.value.scrollTo({ top: 99999999 }) }
 function esc(s) { return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;') }
+// 代码块复制按钮（VP 结构 + VP 样式，行为自己实现：事件委托，copied 态 2s 自动复原）
+function onBodyClick(e) {
+  const btn = e.target.closest('button.copy')
+  if (!btn) return
+  const code = btn.parentElement?.querySelector('pre code')
+  if (!code) return
+  try { navigator.clipboard.writeText(code.textContent) } catch {}
+  btn.classList.add('copied')
+  setTimeout(() => btn.classList.remove('copied'), 2000)
+}
 // 流式渲染：scanStream（frontend/stream_md.mjs，纯函数有 node 测试）把正文按「已闭合 fence」切块——
 // md 块无状态随流重渲；code/mermaid 块带稳定 key（cc0/mm1…）保组件身份，fence 一闭合即
 // 高亮/渲染，之后不再被后续 delta 冲掉。所有块渲染进同一个气泡（视觉上是完整一条消息）。
@@ -236,7 +246,7 @@ async function send() {
             <span class="ai-tool-name">{{ t.running ? '⏳' : '✓' }} {{ t.name }}</span>
             <span class="ai-tool-sum">{{ t.running ? '执行中…' : t.summary }}</span>
           </div>
-          <div v-if="m.text" class="ai-bubble ai-body vp-doc">
+          <div v-if="m.text" class="ai-bubble ai-body vp-doc" @click="onBodyClick">
             <template v-for="seg in renderSegs(m.text)" :key="seg.key">
               <MermaidViewer v-if="seg.type === 'mermaid'" class="ai-mmd" :graph="seg.graph" :id="seg.key + '-' + i" />
               <CodeSeg v-else-if="seg.type === 'code'" :html="seg.html" />
@@ -401,7 +411,8 @@ html.dark .ai-msel-pop { box-shadow: 0 12px 40px rgba(0, 0, 0, .55); }
 /* 内容样式（代码块/表格/引用/列表/行内 code）全套走 vp-doc 主题变量，明暗自适应；
    下面只留聊天气泡语境的间距微调（vp-doc 默认是给正文文章的，间距偏大） */
 .ai-body :deep(p) { margin: 6px 0; }
-.ai-body :deep(h1), .ai-body :deep(h2), .ai-body :deep(h3), .ai-body :deep(h4) { margin: 10px 0 4px; line-height: 1.4; border: none; padding: 0; }
+/* 聊天语境标题统一字号：聊天框里大标题很突兀，一律同正文字号、仅靠加粗区分层级 */
+.ai-body :deep(h1), .ai-body :deep(h2), .ai-body :deep(h3), .ai-body :deep(h4) { margin: 10px 0 4px; line-height: 1.4; border: none; padding: 0; font-size: inherit; font-weight: 600; }
 .ai-body :deep([class*="language-"]) { margin: 8px 0; }
 /* vp-doc 的 pre 只有垂直 padding（横向靠 shiki 的 .line span 撑，我们没有）→ 补横向 padding */
 .ai-body :deep([class*="language-"] pre) { padding: 10px 14px; }

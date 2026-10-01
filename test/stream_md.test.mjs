@@ -66,6 +66,8 @@ test('vpFence 产出 VP 结构：language- 包裹 + lang 标签 + 转义', () =>
   assert.ok(html.includes('<span class="lang">lua</span>'), html)
   assert.ok(html.includes('&lt;x&gt;'), '内容必须转义: ' + html)
   assert.ok(html.includes('<pre><code class="language-lua">'), html)
+  // VP 复制按钮：样式全靠 vp-doc CSS（button.copy + copied 态 data-copied 提示），顺序必须在 span.lang 前
+  assert.ok(html.includes('<button title="Copy Code" class="copy" data-copied="已复制"></button><span class="lang">'), html)
 })
 
 test('vpFence 无语言标记时落 text', () => {
