@@ -1,7 +1,8 @@
 //! 网络辅助：局域网 IP 探测 + 访问地址清单计算（纯逻辑可测）
 
 /// 访问地址清单：本机回环恒在首位；lan 开且有局域网 IP → 追加局域网地址；
-/// hosts（允许域名）逐个追加。port 原样拼接。
+/// hosts（允许域名）逐个追加。IP 类地址拼端口；域名不拼端口——域名访问走标准 80
+/// 端口（前面通常有反代/Caddy 转发到本服务），拼上内部端口反而误导。
 pub fn access_urls(port: u16, lan: bool, lan_ip: Option<&str>, hosts: &[String]) -> Vec<String> {
     let mut urls = vec![format!("http://localhost:{port}")];
     if lan {
@@ -10,7 +11,7 @@ pub fn access_urls(port: u16, lan: bool, lan_ip: Option<&str>, hosts: &[String])
         }
     }
     for h in hosts {
-        urls.push(format!("http://{h}:{port}"));
+        urls.push(format!("http://{h}"));
     }
     urls
 }
@@ -48,11 +49,12 @@ mod tests {
     }
 
     #[test]
-    fn access_urls_hosts_appended_in_order() {
+    fn access_urls_hosts_no_port() {
+        // 域名不带端口（走标准 80，前面有反代转发）；IP/localhost 仍带端口
         let hosts = vec!["docs.example.com".to_string(), "app.example.com".to_string()];
         let urls = access_urls(18753, true, Some("10.0.0.2"), &hosts);
-        assert_eq!(urls[2], "http://docs.example.com:18753");
-        assert_eq!(urls[3], "http://app.example.com:18753");
+        assert_eq!(urls[2], "http://docs.example.com");
+        assert_eq!(urls[3], "http://app.example.com");
     }
 
     #[test]
