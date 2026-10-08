@@ -22,8 +22,10 @@ src/core/
   node.rs              # node.exe 探测
   site.rs              # 站点生成：junction 聚合源 + index.md 导航页 + config.mjs 生成 + 主题文件落盘
   site_templates.rs    # 前端模板入口集：纯 include_str!，无前端代码字符串
-frontend/              # 站点主题真实前端源码（AiChat.vue / theme_index.js / custom.css / stream_md.mjs）
+frontend/              # 站点主题真实前端源码（AiChat.vue / theme_index.js / custom.css / stream_md.mjs /
+                       #   chat_ops.mjs / md_guard.mjs）
                        # ——编译期 include_str! 嵌入 exe，site.rs 构建时写入主题目录；禁止回 rs 写前端字符串
+                       # md_guard.mjs 例外落盘到 .vitepress/ 根（config.mjs 的 markdown.config import 它）
   builder.rs           # vitepress build 短命 spawn（Job Object KILL_ON_JOB_CLOSE 兜底防孤儿）
   httpd.rs             # 内嵌 HTTP 服务（tiny_http）：静态 + /_api/* + /_mcp 路由
   watcher.rs           # notify 监听 md 变更（真实路径，不经 junction）
@@ -75,6 +77,8 @@ doc/research/          # 设计文档（架构重构方案等）
 
 **对话面板交互（v0.3.1 追加）**：流式渲染=单气泡增量提交——一条消息一个 `.ai-body` 气泡，内部按已闭合 fence 切 md/code/mermaid 块（`frontend/stream_md.mjs` 纯函数 `scanStream`，真实前端文件 `include_str!` 嵌入、node --test 可测；code/mermaid 块带稳定 key cc0/mm1 保组件身份，fence 闭合即高亮/渲染不被后续 delta 冲掉）。**禁止把块渲染成独立气泡卡片**（机制泄漏成视觉，被用户打回）。**坑：局部组件写运行时 template 字符串在 runtime-only vue 下静默渲染为空**（CodeSeg 曾因此整段代码消失）——必须用 render 函数。侧边用户消息锚点导航（左缘竖点 rail，PC hover 展开、移动端点展开/点外或点锚点关闭——**弹层必须是 rail 旁的 flex 兄弟节点**（in-flow），absolute top:0 会让弹层与垂直居中的 rail 错位，hover 路径一离开就 mouseleave 关弹层）；窗口三档尺寸（''/tall/full + 移动端媒体查询占满屏，goSource 自动退出 full）；head 注入 viewport `user-scalable=no` 防手机端页面被捏合拖大（mermaid viewer 是自身 transform 手势缩放，不受影响）。**大坑：手写 `-webkit-backdrop-filter` 会被 lightningcss 去重吞掉无前缀 `backdrop-filter`**——Chrome 142+ 已不支持 -webkit 别名，产物里只剩 webkit 前缀 = 毛玻璃从不生效（「穿透看不清」根治其实是透明度）。**只写无前缀属性**，交给构建处理。暗色下代码块底色要用白 7% 而不是黑 6%（深底上再压黑等于没底色）。**内容卡片一律复用 vp-doc**：气泡容器挂 `vp-doc` class + `vpFence` 产出 VP 代码块包裹结构（div.language-xxx + lang 角标），代码/表格/引用/列表全走 VP 主题样式，禁止自绘内容卡片；vp-doc 的 pre 横向 padding 依赖 shiki .line span，非 shiki 来源要自补横向 padding。mermaid 连线标签一律 `A -->|文字| B`（`<-.- "x" .->` 非法，LLM 高频踩）。
 
+**md 裸标签防护（v0.3.1 追加）**：md 表格/正文里 `Sync_<Model>`、`Array<Player>` 这类「像标签的文本」被 markdown-it 当行内 HTML 原样透传，vite:vue 编译遇未闭合元素直接 build 失败（Element is missing end tag）。**vite 插件层拦不住**（fence 转义方案实测无效：fence 内容 markdown-it 本就会转义，真正的炸点是 fence 外的 html_inline/html_block token）——正确挂点是 markdown 层：`frontend/md_guard.mjs` 的 `mdAngleGuard(md)` 在 `markdown.config` 里注册 core 规则，对 html_inline/html_block token 做**配对追踪**（不看标签名）：未闭合/未匹配闭合 → `< >` 转实体（页面显示为字面文本，符合作者意图）；配对完好/自闭合/void 一律保留——合法 HTML（ftree 的 pre/span）与故意写的 Vue 组件（`<MermaidViewer />`）都不受影响。已知妥协：配对完好的「假标签文本」会按未知组件编译（能构建、子文本照常渲染，仅两侧尖括号不显示）。纯函数 `guardHtmlTokens` 零依赖，`node --test test/md_guard.test.mjs` 可测。
+
 ## 使用方约定（改代码前必读）
 
 - 应用只需实现 `ShellApp` 并调 `bgd_appsdk::app::run`——公共逻辑（CLI 分发、单实例、看守线程、项目解析、窗口壳）全托管，禁止自己再写一套。
@@ -109,6 +113,7 @@ cargo test --lib                              # 单元测试（42 个，含真�
 cargo test --test lifecycle -- --test-threads=1  # 生命周期 E2E（真实 exe + vitepress build + 索引，约 1 分钟）
 node --test test/stream_md.test.mjs           # 流式分段解析器（frontend/stream_md.mjs，零依赖）
 node --test test/chat_ops.test.mjs            # 对话操作纯逻辑：截断/重试/导出 md（frontend/chat_ops.mjs）
+node --test test/md_guard.test.mjs            # md 裸标签防护：token 级白名单+配对转义（frontend/md_guard.mjs）
 # 真实 LLM 链路（可选）：设 BGD_TEST_LLM_BASE/KEY/MODEL 三个环境变量后跑 ask_live_llm_streaming
 ```
 

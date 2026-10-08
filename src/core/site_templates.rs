@@ -19,3 +19,6 @@ pub(crate) const STREAM_MD_MJS: &str = include_str!("../../frontend/stream_md.mj
 
 /// 对话操作纯逻辑（截断/重试/导出 md；node --test test/chat_ops.test.mjs 直测）
 pub(crate) const CHAT_OPS_MJS: &str = include_str!("../../frontend/chat_ops.mjs");
+
+/// 构建期防护（fence 内 < > 转实体，防 Vue 模板解析炸构建；node --test test/md_guard.test.mjs 直测）
+pub(crate) const MD_GUARD_MJS: &str = include_str!("../../frontend/md_guard.mjs");
