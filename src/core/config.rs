@@ -48,13 +48,13 @@ pub struct GlobalConfig {
     /// LLM 模型（如 kimi-k3-0700）
     #[serde(default)]
     pub llm_model: String,
-    /// 最大工具调用轮数（默认 5，范围 1-20）
+    /// 最大工具调用轮数（默认 500，范围 1-9999）
     #[serde(default = "default_max_rounds")]
     pub max_tool_rounds: usize,
 }
 
 fn default_auto_rebuild() -> bool { true }
-fn default_max_rounds() -> usize { 5 }
+fn default_max_rounds() -> usize { 500 }
 
 /// 项目级配置（<项目>/.bgd/docs.json；只存与全局不同的项）
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]

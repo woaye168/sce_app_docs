@@ -53,7 +53,7 @@ doc/research/          # 设计文档（架构重构方案等）
 
 ## 架构要点（v0.3 知识库，2026-09-29）
 
-**语义检索 + AI 问答 + MCP**：md → 分块（chunk）→ 本地 embedding（fastembed + bge-m3，模型导入/在线下载）→ sqlite 向量库按文件 hash 增量（kb/indexer）→ `/_api/search`；问答走多轮 Tool Calling（ask.rs，LLM 自主检索/深读，轮数界面可配 1-20），SSE 流式到毛玻璃问答组件；MCP 端点 `/_mcp`（Streamable HTTP）与问答共用同一份工具实现（ask::tools_defs/exec_tool）。
+**语义检索 + AI 问答 + MCP**：md → 分块（chunk）→ 本地 embedding（fastembed + bge-m3，模型导入/在线下载）→ sqlite 向量库按文件 hash 增量（kb/indexer）→ `/_api/search`；问答走多轮 Tool Calling（ask.rs，LLM 自主检索/深读，轮数界面可配 1-9999，默认 500），SSE 流式到毛玻璃问答组件；MCP 端点 `/_mcp`（Streamable HTTP）与问答共用同一份工具实现（ask::tools_defs/exec_tool）。
 
 - **路由避让**：文档源占用 `/api/`——本应用 API 一律 `/_api/`，MCP 用 `/_mcp`，禁止新增裸 `/api/` 路由。
 - **安全边界（硬约束）**：检索/问答/MCP 三个工具（search_docs/get_doc/list_sources）全部只读文档库；禁止加任何执行 shell/写文件/任意路径读取的工具。get_doc 只能读已索引文件（天然防路径穿越）。

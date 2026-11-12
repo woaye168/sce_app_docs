@@ -137,7 +137,7 @@ pub fn start(project_root: &std::path::Path, global: &GlobalConfig, project: &Pr
             api_key: global.llm_api_key.clone(),
             model: global.llm_model.clone(),
         },
-        max_rounds: global.max_tool_rounds.clamp(1, 20),
+        max_rounds: global.max_tool_rounds.clamp(1, 9999),
         mcp_sessions: Mutex::new(crate::core::mcp::SessionMgr::new()),
     });
     // 访问地址清单：localhost 恒在；lan 开 → 局域网 IP；域名开关开 → 允许域名

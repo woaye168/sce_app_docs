@@ -67,7 +67,7 @@ impl App {
         }
         ui.horizontal(|ui| {
             ui.label("最大工具调用轮数：");
-            ui.add(egui::DragValue::new(&mut self.global_cfg.max_tool_rounds).range(1..=20));
+            ui.add(egui::DragValue::new(&mut self.global_cfg.max_tool_rounds).range(1..=9999));
             ui.checkbox(&mut self.global_cfg.rerank_enabled, "检索重排（rerank，建议开）");
         });
         ui.horizontal(|ui| {
